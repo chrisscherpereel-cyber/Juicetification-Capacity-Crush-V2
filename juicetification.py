@@ -9,6 +9,9 @@ import base64
 import hashlib
 import statistics
 from collections import deque
+from juice_director import serve_manifest_if_requested, resolve_config
+from manifest import MANIFEST
+import student_store as store
 
 # =========================================================
 # Page configuration
@@ -19,6 +22,48 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# =========================================================
+# Juicetification Director integration
+# =========================================================
+# 1) Serve this app's parameter schema when the Director asks for it (?manifest=1).
+# 2) Resolve any instructor configuration / random seed the Director passes in.
+# With no Director parameters in the URL, resolve_config returns built-in defaults and
+# the app behaves exactly as before. (Instructor config still arrives through the app's
+# own ?cfg= snapshot mechanism below; DIRECTOR_CTX is used only for the shared seed.)
+serve_manifest_if_requested(MANIFEST)
+_DIRECTOR_PARAMS, DIRECTOR_CTX = resolve_config(MANIFEST)
+
+# =========================================================
+# Per-student persistence (student_store)
+# =========================================================
+# Identify the student from the URL before the scenario is created. When shared storage is
+# configured, block on a small gate until a student ID is entered — this lets progress be
+# saved/resumed and makes each student's scenario stable. When storage is NOT configured,
+# store.enabled() is False, every store.* call is a safe no-op, and the app behaves exactly
+# as before (no gate, random scenario).
+_STORE_GAME = store.game_code()
+_STORE_SID = store.get_student_id()
+
+if store.enabled() and not _STORE_SID:
+    st.title("🧃 Juicetification: Capacity Crush")
+    st.text_input("Enter your student ID to begin", key="_sid_entry",
+                  placeholder="e.g., your campus username")
+    if st.button("Start", type="primary"):
+        _entered = (st.session_state.get("_sid_entry") or "").strip()
+        if _entered:
+            store.set_student_id(_entered)
+            st.rerun()
+    st.stop()
+
+# Scenario seed: stable per student when identified (so the same student always gets the
+# same line), else the Director's ?seed= when provided, else fully random (unchanged).
+if _STORE_SID:
+    SCENARIO_SEED = store.derive_seed(_STORE_GAME, _STORE_SID)
+elif DIRECTOR_CTX.get("seed") is not None:
+    SCENARIO_SEED = DIRECTOR_CTX["seed"]
+else:
+    SCENARIO_SEED = None
 
 # =========================================================
 # Defaults
@@ -129,9 +174,42 @@ def save_run_snapshot():
         pass
 
 
+def _director_to_snapshot(cfg):
+    """Normalize a ?cfg= dict to this app's per-station snapshot keys so that links built
+    two different ways both restore correctly:
+      * the app's own snapshot format (capacity_i, sides_i, wip_cap_i, scrap_pct_i, ...),
+        which passes straight through, and
+      * the Juicetification Director / manifest format, whose four aggregate keys
+        (capacities, sides, wip_cap, scrap_pct) are expanded here into per-station keys.
+    Every other manifest key (scalars and fin_*) already matches a snapshot key 1:1."""
+    if not isinstance(cfg, dict):
+        return {}
+    out = dict(cfg)
+    caps = out.pop("capacities", None)
+    if isinstance(caps, (list, tuple)):
+        for i in range(N_OPS):
+            if i < len(caps):
+                out[f"capacity_{i}"] = caps[i]
+    sides = out.pop("sides", None)
+    if isinstance(sides, (list, tuple)):
+        for i in range(N_OPS):
+            if i < len(sides):
+                out[f"sides_{i}"] = sides[i]
+    wip_cap = out.pop("wip_cap", None)
+    if wip_cap is not None:
+        for i in range(N_OPS):
+            out[f"wip_cap_{i}"] = wip_cap
+    scrap_pct = out.pop("scrap_pct", None)
+    if scrap_pct is not None:
+        for i in range(N_OPS):
+            out[f"scrap_pct_{i}"] = scrap_pct
+    return out
+
+
 def _load_run_seed():
     """Values to seed the inputs with on a fresh session: the last run if we have one
-    (from this session or restored from the URL), otherwise an empty dict (→ defaults)."""
+    (from this session or restored from the URL), otherwise an empty dict (→ defaults).
+    Accepts both the app's own snapshot keys and the Director's manifest keys."""
     if isinstance(st.session_state.get("last_run_config"), dict):
         return st.session_state["last_run_config"]
     raw = st.query_params.get("cfg")
@@ -139,6 +217,7 @@ def _load_run_seed():
         try:
             seed = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
             if isinstance(seed, dict):
+                seed = _director_to_snapshot(seed)
                 st.session_state["last_run_config"] = seed
                 return seed
         except Exception:
@@ -205,6 +284,103 @@ def _save_progress():
         pass
 
 
+def _jsonable(v):
+    """Make a value safe for json.dumps: numpy arrays/scalars, sets, and DataFrames all
+    become plain lists / numbers / dicts. Anything else unknown becomes None."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, set):
+        return sorted(_jsonable(x) for x in v)
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if hasattr(v, "to_dict"):            # pandas DataFrame / Series
+        try:
+            return v.to_dict("list")
+        except Exception:
+            try:
+                return v.to_dict()
+            except Exception:
+                return None
+    if hasattr(v, "tolist"):            # numpy array / scalar
+        try:
+            return _jsonable(v.tolist())
+        except Exception:
+            return None
+    for _cast in (int, float):
+        try:
+            return _cast(v)
+        except Exception:
+            pass
+    return None
+
+
+def _is_store_progress_key(k):
+    """The session keys that make up a student's *progress* (persisted to shared storage).
+    Deliberately excludes the sidebar scenario config (set by the seed / Director) and the
+    two answer widgets that pass an explicit default (_pred_, _est_), which Streamlit would
+    warn about if pre-seeded — matching the app's existing reload behavior for those."""
+    if not isinstance(k, str):
+        return False
+    if k in ("lab_choice", "student_name"):
+        return True
+    if k.endswith("_step") and k[:-5] in LAB_ORDER:
+        return True
+    if "_reflect_" in k:
+        return True
+    if "_chal_attempts_" in k or "_chal_passed_" in k or "_chal_seen_" in k:
+        return True
+    return False
+
+
+def _progress_snapshot():
+    """A plain-JSON snapshot of just the student's progress (no figures, RNG, or widgets)."""
+    ss = st.session_state
+    snap = {}
+    lp = ss.get("lab_progress")
+    if isinstance(lp, dict):
+        snap["lab_progress"] = {str(p): sorted(int(x) for x in v) for p, v in lp.items() if v}
+    rd = ss.get("reflect_done")
+    if isinstance(rd, (set, list, tuple)):
+        snap["reflect_done"] = sorted(str(x) for x in rd)
+    for k in list(ss.keys()):
+        if _is_store_progress_key(k):
+            snap[k] = _jsonable(ss[k])
+    return snap
+
+
+def _restore_progress(saved):
+    """Copy a saved snapshot back into session_state (progress keys only). Called once, right
+    after initialize_state() and before any widgets are created, so pre-seeding is safe."""
+    if not isinstance(saved, dict) or not saved:
+        return
+    ss = st.session_state
+    for k, v in saved.items():
+        if k == "lab_progress" and isinstance(v, dict):
+            ss["lab_progress"] = {str(p): set(int(x) for x in lst) for p, lst in v.items()}
+        elif k == "reflect_done" and isinstance(v, (list, tuple)):
+            ss["reflect_done"] = set(str(x) for x in v)
+        elif _is_store_progress_key(k):
+            ss[k] = v
+
+
+def _autosave():
+    """Persist progress to shared storage after a meaningful step. No-op when storage is off
+    or no student is identified; skips the write when nothing has changed."""
+    if not store.enabled() or not _STORE_SID:
+        return
+    try:
+        snap = _progress_snapshot()
+        enc = json.dumps(snap, separators=(",", ":"), sort_keys=True)
+        if st.session_state.get("_last_saved") == enc:
+            return
+        if store.save(_STORE_GAME, _STORE_SID, snap):
+            st.session_state["_last_saved"] = enc
+    except Exception:
+        pass
+
+
 def mark_step_done(prefix, i):
     """Record that the student has predicted and run step i of a lab. Idempotent; only
     touches the URL when something actually changed."""
@@ -213,6 +389,7 @@ def mark_step_done(prefix, i):
     if i not in done:
         done.add(i)
         _save_progress()
+        _autosave()
 
 
 def _get_reflect():
@@ -249,6 +426,7 @@ def mark_reflect_done(prefix, i):
     if key not in done:
         done.add(key)
         _save_reflect()
+        _autosave()
 
 
 def reflect_totals():
@@ -4685,6 +4863,13 @@ def financials_dialog():
 
 initialize_state()
 
+# Restore this student's saved progress once per session (transparent no-op when storage
+# is unconfigured — load() returns {}). Runs before any widgets render, so the restored
+# lab position, completed steps, reflections, and challenge results take effect cleanly.
+if _STORE_SID and not st.session_state.get("_restored"):
+    st.session_state["_restored"] = True
+    _restore_progress(store.load(_STORE_GAME, _STORE_SID))
+
 # Supplier reliability is stored as a percentage (0–100); the simulation takes a
 # probability in [0, 1]. demand-stream dice are only active when the variable-market
 # switch is on. These derived values feed the simulation everywhere, so both the labs
@@ -5188,6 +5373,11 @@ with st.sidebar:
                         st.session_state["completion_code"] = code
                         st.session_state["_code_payload"] = payload
                         st.session_state["_code_warn"] = False
+                        # Also record this completion to shared storage for the roster
+                        # (no-op when storage is off or no student is identified).
+                        store.record_completion(_STORE_GAME, _STORE_SID,
+                                                completion_code=code,
+                                                score=payload.get("pct"))
                 if st.session_state.get("_code_warn"):
                     st.warning("Type your name first, then generate the code.")
                 if st.session_state.get("completion_code"):
@@ -5461,6 +5651,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# When shared storage is on and the student is identified, show a small confirmation that
+# their work is being saved (the ?sid= in the URL makes a refresh restore state).
+if store.enabled() and _STORE_SID:
+    st.caption(f"Signed in as {_STORE_SID} · progress saved automatically")
+
 with st.expander("How this works & what each output means"):
     st.markdown(
         f"""
@@ -5530,6 +5725,10 @@ if run_clicked and not errs:
             if st.session_state.get("reorder_point_on") else None)
     _scrap = ([st.session_state.get(f"scrap_pct_{i}", 0) / 100.0 for i in range(N_OPS)]
               if st.session_state.get("scrap_on") else None)
+    # Seed the run from the student's stable scenario seed when one exists (identified
+    # student → derived seed; else Director ?seed=; else None = fully random, as before).
+    if SCENARIO_SEED is not None:
+        random.seed(SCENARIO_SEED)
     full = run_simulation(
         caps, sides,
         int(st.session_state["starting_inventory"]),

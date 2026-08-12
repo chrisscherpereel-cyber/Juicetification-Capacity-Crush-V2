@@ -87,6 +87,46 @@ Streamlit will open the simulation in your browser (usually at http://localhost:
 
 ---
 
+## Instructor configuration (Juicetification Director)
+
+The app ships ready for the **Juicetification Director**, a shared system for setting up
+configurable, per-section assignments without editing any code. Two small files provide it:
+`juice_director.py` (identical across every simulation in the family — drop-in, never edited) and
+`manifest.py` (this app's parameter schema). **If no Director parameters are present in the URL, the
+app behaves exactly as it always has.**
+
+- **Schema endpoint** — visiting `…/?manifest=1` returns this app's parameter schema as JSON, so the
+  Director can discover the available settings (line configuration, WIP cap, supplier reliability,
+  demand, scrap, and the economics) with no shared code.
+- **Configured links** — the Director hands out a self-contained link (`…/?cfg=<encoded>`) that
+  pre-fills the sidebar with the instructor's chosen starting values. The app accepts both the
+  Director's parameter names and its own internal snapshot format, so older shared links keep working.
+- **Reproducible runs** — adding `…/?seed=<number>` makes every student on the same assignment see the
+  same random draws, which is useful for fair grading of an open design challenge. Without a seed, runs
+  stay fully random.
+
+No accounts or servers are involved; a configured assignment is just a URL.
+
+### Per-student progress and stable scenarios
+
+With storage configured (`student_store.py` — the same file every simulation in the family uses),
+the app also saves each student's progress and gives each student a stable, unique line:
+
+- **Sign-in gate** — when storage is on, students enter a student ID once (kept in the URL as
+  `?sid=`), so a refresh or a return visit resumes exactly where they left off. When storage is off,
+  there is no gate and nothing changes.
+- **Automatic save/resume** — completed steps, reflections, challenge results, and lab position are
+  written to encrypted per-student files after each meaningful step, and restored on load.
+- **Stable per-student scenario** — the run seed is derived deterministically from the student ID, so
+  the same student always faces the same line (and different students get different ones). This takes
+  priority over the Director's `?seed=`; with neither, runs stay fully random.
+- **Completion roster** — when a student generates their completion code, it is also recorded to
+  storage so an instructor can assemble a roster.
+
+Storage is enabled only when its secrets are set (`DB_ENCRYPTION_KEY` plus Dropbox credentials); it
+requires the `dropbox` and `cryptography` packages, which are listed in `requirements.txt`. **With no
+secrets set, every storage call is a safe no-op and the app runs exactly as it does standalone.**
+
 ## How the design maps to learning theory
 
 The `paper/` folder contains the full manuscript describing the theoretical grounding and design
@@ -104,6 +144,9 @@ the design challenge, the capstone diagnosis, and the self-explanation prompt.
 ```
 Juicetification-Capacity-Crush/
 ├── juicetification.py     # the simulation (single-file Streamlit app)
+├── juice_director.py      # shared Director config loader (identical across apps)
+├── manifest.py            # this app's parameter schema for the Director
+├── student_store.py       # shared per-student progress store (identical across apps)
 ├── instructions.pdf       # one-page visual student guide
 ├── requirements.txt
 ├── README.md

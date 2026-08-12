@@ -1,2 +1,8 @@
 streamlit>=1.30
 pandas>=2.0
+
+# Per-student persistence (student_store.py). Required once storage secrets
+# (DB_ENCRYPTION_KEY + Dropbox credentials) are configured; without them the app
+# still runs and these are simply unused.
+dropbox>=11.0
+cryptography>=42.0
