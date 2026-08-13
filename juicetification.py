@@ -2160,26 +2160,32 @@ def _nav_bump():
 def _scroll_to_top_on_nav():
     """Scroll the main view to the top exactly once after a navigation event. Fires only when
     the nav token advanced (not on ordinary reruns like typing or running a step), so it never
-    fights the user while they scroll."""
+    fights the user while they scroll.
+
+    The nav token is embedded in the injected markup on purpose: Streamlit reuses an iframe
+    whose HTML is byte-identical across reruns and will NOT re-execute its <script>, so without
+    a changing value the scroll would only ever run the first time. Making the content unique
+    per navigation forces the iframe to remount and the scroll to run every time."""
     tok = st.session_state.get("_nav_token", 0)
     if st.session_state.get("_nav_token_seen") == tok:
         return
     st.session_state["_nav_token_seen"] = tok
     components.html(
-        """
+        f"""
         <script>
-          (function () {
+          (function () {{
+            var navToken = {tok};  /* unique per navigation → forces re-execution */
             var doc = window.parent.document;
             var sels = ['section.main', '[data-testid="stMain"]',
                         '[data-testid="stAppViewContainer"]', '.stMainBlockContainer'];
-            for (var i = 0; i < sels.length; i++) {
+            for (var i = 0; i < sels.length; i++) {{
               var el = doc.querySelector(sels[i]);
-              if (el) { try { el.scrollTo({top: 0, left: 0, behavior: 'auto'}); }
-                        catch (e) { el.scrollTop = 0; } }
-            }
-            try { (doc.scrollingElement || doc.documentElement).scrollTop = 0; } catch (e) {}
-            try { window.parent.scrollTo(0, 0); } catch (e) {}
-          })();
+              if (el) {{ try {{ el.scrollTo({{top: 0, left: 0, behavior: 'auto'}}); }}
+                        catch (e) {{ el.scrollTop = 0; }} }}
+            }}
+            try {{ (doc.scrollingElement || doc.documentElement).scrollTop = 0; }} catch (e) {{}}
+            try {{ window.parent.scrollTo(0, 0); }} catch (e) {{}}
+          }})();
         </script>
         """,
         height=0,
