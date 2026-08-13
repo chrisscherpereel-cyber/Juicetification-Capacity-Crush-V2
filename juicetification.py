@@ -9,6 +9,7 @@ import base64
 import hashlib
 import statistics
 from collections import deque
+import streamlit.components.v1 as components
 from juice_director import serve_manifest_if_requested, resolve_config
 from manifest import MANIFEST
 import student_store as store
@@ -569,6 +570,10 @@ def initialize_state():
     st.session_state.setdefault("qual_step", 0)
     st.session_state.setdefault("diag_step", 0)
     st.session_state.setdefault("run_counter", 0)
+    # Navigation tokens for the scroll-to-top-on-nav behavior (equal on first load → no scroll
+    # until a real navigation event advances the token).
+    st.session_state.setdefault("_nav_token", 0)
+    st.session_state.setdefault("_nav_token_seen", 0)
     # Financials — seed from the last run when starting a fresh session (so they persist
     # across reloads), otherwise keep whatever the widgets hold. They only return to
     # defaults when the "Reset financials" button is pressed.
@@ -2146,7 +2151,42 @@ LAB_OPS = [
 ]
 
 
-def lab_apply_setup(prefix, idx=None):
+def _nav_bump():
+    """Mark that a screen change just happened, so the page scrolls back to the top once on
+    the resulting rerun (see _scroll_to_top_on_nav). Called from the navigation callbacks."""
+    st.session_state["_nav_token"] = st.session_state.get("_nav_token", 0) + 1
+
+
+def _scroll_to_top_on_nav():
+    """Scroll the main view to the top exactly once after a navigation event. Fires only when
+    the nav token advanced (not on ordinary reruns like typing or running a step), so it never
+    fights the user while they scroll."""
+    tok = st.session_state.get("_nav_token", 0)
+    if st.session_state.get("_nav_token_seen") == tok:
+        return
+    st.session_state["_nav_token_seen"] = tok
+    components.html(
+        """
+        <script>
+          (function () {
+            var doc = window.parent.document;
+            var sels = ['section.main', '[data-testid="stMain"]',
+                        '[data-testid="stAppViewContainer"]', '.stMainBlockContainer'];
+            for (var i = 0; i < sels.length; i++) {
+              var el = doc.querySelector(sels[i]);
+              if (el) { try { el.scrollTo({top: 0, left: 0, behavior: 'auto'}); }
+                        catch (e) { el.scrollTop = 0; } }
+            }
+            try { (doc.scrollingElement || doc.documentElement).scrollTop = 0; } catch (e) {}
+            try { window.parent.scrollTo(0, 0); } catch (e) {}
+          })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def lab_apply_setup(prefix, idx=None, force_reset=False):
     """Configure the line to match a lab step's scenario (without running). So whenever
     a step is shown, the sidebar already reflects exactly what the step is asking about."""
     steps = LABS[prefix]["steps"]
@@ -2158,7 +2198,12 @@ def lab_apply_setup(prefix, idx=None):
         st.session_state[k] = v
     st.session_state["sim_results"] = None
     if steps[idx].get("challenge"):
-        _chal_reset(prefix, idx)
+        # A challenge that's already been resolved (recorded in progress) keeps its pass/try
+        # state when revisited, so returning to it doesn't wipe the result and disable Next.
+        # A fresh challenge — or an explicit "Reset & try again" — starts clean.
+        already_done = idx in _get_progress().get(prefix, set())
+        if force_reset or not already_done:
+            _chal_reset(prefix, idx)
 
 
 def _chal_reset(prefix, idx):
@@ -2176,12 +2221,14 @@ def lab_goto(prefix, idx):
     # Each new step opens already set up to match what it's asking about; the student
     # predicts first, then presses Run.
     lab_apply_setup(prefix, idx)
+    _nav_bump()
 
 
 def lab_on_choice_change():
     """When the user picks a different guided lab, set up its current step."""
     prefix = lab_prefix_from_choice(st.session_state.get("lab_choice", ""))
     lab_apply_setup(prefix)
+    _nav_bump()
 
 
 def lab_go_to_lab(prefix):
@@ -2191,6 +2238,7 @@ def lab_go_to_lab(prefix):
         st.session_state["lab_choice"] = LAB_CHOICE_LABEL[prefix]
     st.session_state[f"{prefix}_step"] = 0
     lab_apply_setup(prefix, 0)
+    _nav_bump()
 
 
 def lab_on_mode_change():
@@ -2198,6 +2246,7 @@ def lab_on_mode_change():
     if st.session_state.get("app_mode") == "Guided Lab":
         prefix = lab_prefix_from_choice(st.session_state.get("lab_choice", ""))
         lab_apply_setup(prefix)
+    _nav_bump()
 
 
 def lab_setup_and_run(prefix):
@@ -4597,7 +4646,8 @@ def _render_challenge(prefix, i, challenge, results):
         st.caption("Adjust the line in the sidebar and run it to see how you score against the goal.")
 
     st.button("↺  Reset & try again", use_container_width=True,
-              on_click=lab_apply_setup, args=(prefix, i), key=f"{prefix}_chalreset_{i}")
+              on_click=lab_apply_setup, args=(prefix, i), kwargs={"force_reset": True},
+              key=f"{prefix}_chalreset_{i}")
     return resolved
 
 
@@ -5640,6 +5690,10 @@ with st.sidebar:
 # =========================================================
 # MAIN WINDOW — simulation & results
 # =========================================================
+# If the student just navigated (Previous/Next, a new lab, mode change), snap the view back
+# to the top once. No-op on ordinary reruns (typing, running a step).
+_scroll_to_top_on_nav()
+
 st.markdown(
     """
     <div class="hero">
