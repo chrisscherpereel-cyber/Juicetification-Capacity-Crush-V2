@@ -149,6 +149,7 @@ Juicetification-Capacity-Crush/
 ├── student_store.py       # shared per-student progress store (identical across apps)
 ├── instructions.pdf       # one-page visual student guide
 ├── requirements.txt
+├── .streamlit/config.toml   # pins the light theme (the UI is designed for a light background)
 ├── README.md
 ├── LICENSE
 ├── paper/                 # academic write-up (design rationale + theory)

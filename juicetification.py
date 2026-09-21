@@ -2176,6 +2176,14 @@ def _scroll_to_top_on_nav():
           (function () {{
             var navToken = {tok};  /* unique per navigation → forces re-execution */
             var doc = window.parent.document;
+            /* In a guided lab the tasks sit below the title and metrics, so bring the lab panel
+               itself to the top of the view (scroll-margin-top clears the Streamlit header).
+               In the sandbox there is no anchor, so fall back to the absolute top. */
+            var anchor = doc.getElementById('jcc-labtop');
+            if (anchor && anchor.scrollIntoView) {{
+              try {{ anchor.scrollIntoView({{block: 'start', behavior: 'auto'}}); return; }}
+              catch (e) {{}}
+            }}
             var sels = ['section.main', '[data-testid="stMain"]',
                         '[data-testid="stAppViewContainer"]', '.stMainBlockContainer'];
             for (var i = 0; i < sels.length; i++) {{
@@ -2228,6 +2236,7 @@ def lab_goto(prefix, idx):
     # predicts first, then presses Run.
     lab_apply_setup(prefix, idx)
     _nav_bump()
+    _autosave()          # persist the new step position so a refresh resumes here, not one back
 
 
 def lab_on_choice_change():
@@ -2235,6 +2244,7 @@ def lab_on_choice_change():
     prefix = lab_prefix_from_choice(st.session_state.get("lab_choice", ""))
     lab_apply_setup(prefix)
     _nav_bump()
+    _autosave()
 
 
 def lab_go_to_lab(prefix):
@@ -2245,6 +2255,7 @@ def lab_go_to_lab(prefix):
     st.session_state[f"{prefix}_step"] = 0
     lab_apply_setup(prefix, 0)
     _nav_bump()
+    _autosave()
 
 
 def lab_on_mode_change():
@@ -3957,7 +3968,7 @@ LAB_DIAG = [
                     "doesn't starve Operation 1.",
             "targets": [
                 {"label": "Service level", "get": lambda r: r["service_level"] * 100, "fmt": "{:,.0f}%",
-                 "goal": "≥ 95%", "ok": lambda r: r["service_level"] >= 0.95},
+                 "goal": "≥ 95%", "ok": lambda r: round(r["service_level"] * 100) >= 95},
                 {"label": "Bottles finished", "get": lambda r: r["total_output"], "fmt": "{:,.0f}",
                  "goal": "≥ 6,000", "ok": lambda r: r["total_output"] >= 6000},
             ],
@@ -3995,7 +4006,7 @@ LAB_DIAG = [
                 {"label": "Good bottles finished", "get": lambda r: r["total_output"], "fmt": "{:,.0f}",
                  "goal": "≥ 6,000", "ok": lambda r: r["total_output"] >= 6000},
                 {"label": "Overall yield", "get": lambda r: r["yield_rate"] * 100, "fmt": "{:,.0f}%",
-                 "goal": "≥ 90%", "ok": lambda r: r["yield_rate"] >= 0.90},
+                 "goal": "≥ 90%", "ok": lambda r: round(r["yield_rate"] * 100) >= 90},
             ],
         },
         "check": lambda r: True,
@@ -4203,7 +4214,7 @@ LAB_CHALLENGES = {
             {"label": "Good bottles finished", "get": lambda r: r["total_output"], "fmt": "{:,.0f}",
              "goal": "≥ 6,000", "ok": lambda r: r["total_output"] >= 6000},
             {"label": "Overall yield", "get": lambda r: r["yield_rate"] * 100, "fmt": "{:,.0f}%",
-             "goal": "≥ 90%", "ok": lambda r: r["yield_rate"] >= 0.90},
+             "goal": "≥ 90%", "ok": lambda r: round(r["yield_rate"] * 100) >= 90},
         ],
     },
     "fin": {
@@ -4275,7 +4286,7 @@ LAB_CHALLENGES = {
                 "the target — pushing it much past the sweet spot just piles up idle raw inventory.",
         "targets": [
             {"label": "Service level", "get": lambda r: r["service_level"] * 100, "fmt": "{:,.0f}%",
-             "goal": "≥ 95%", "ok": lambda r: r["service_level"] >= 0.95},
+             "goal": "≥ 95%", "ok": lambda r: round(r["service_level"] * 100) >= 95},
             {"label": "Average raw inventory", "get": _chal_avg_raw, "fmt": "{:,.0f}",
              "goal": "< 80", "ok": lambda r: _chal_avg_raw(r) < 80},
         ],
@@ -4846,6 +4857,7 @@ def render_glossary_card():
                 "**Demand (D)** — bottles needed per year.  **Ordering cost (S)** — the cost to place "
                 "one order.  **Holding cost (H)** — the cost to keep one bottle in stock for a "
                 "period.\n\n"
+                "**P&L (Profit and Loss)** — a simple income statement for the line: the revenue from bottles sold minus every cost (materials, holding, ordering, and operating expense) equals profit.\n\n"
                 "**Throughput Accounting** — **T** (throughput) = revenue − material cost;  **I** = "
                 "money tied up in inventory and equipment;  **OE** = operating expense (the other "
                 "running costs). Net profit = T − OE; return on investment = (T − OE) ÷ I.\n\n"
@@ -5553,10 +5565,12 @@ with st.sidebar:
                         unsafe_allow_html=True)
             fin_number_input(
                 st, "Ordering cost — S ($/order)", "fin_order_cost", DEFAULT_ORDER_COST,
-                wprefix="sb", min_value=0.0, step=5.0, format="%.2f")
+                wprefix="sb", min_value=1.0, step=5.0, format="%.2f",
+                help="Must be at least $1 — a zero ordering cost makes the EOQ math meaningless.")
             fin_number_input(
                 st, "Holding cost — H ($/bottle/day)", "fin_raw_holding", DEFAULT_RAW_HOLDING,
-                wprefix="sb", min_value=0.0, step=0.01, format="%.3f")
+                wprefix="sb", min_value=0.005, step=0.01, format="%.3f",
+                help="Must be positive — a zero holding cost makes the EOQ math meaningless.")
             _hy = float(st.session_state.get("fin_raw_holding", DEFAULT_RAW_HOLDING)) * DAYS_PER_YEAR
             st.caption(f"Holding works out to ≈ \\${_hy:,.2f} per bottle per year. "
                        f"EOQ = √(2·D·S ÷ H): bigger with demand and ordering cost, smaller with holding.")
@@ -5898,6 +5912,10 @@ if reps_clicked and not errs:
 # ---- Guided Lab panel (directed exercise) sits above the dashboard ----
 if st.session_state.get("app_mode") == "Guided Lab":
     _prefix = lab_prefix_from_choice(st.session_state.get("lab_choice", ""))
+    # Anchor the top of the lab panel so navigation scrolls the tasks into view (not the
+    # title/metrics above them). scroll-margin-top keeps it clear of the fixed header.
+    st.markdown('<div id="jcc-labtop" style="scroll-margin-top: 5rem;"></div>',
+                unsafe_allow_html=True)
     render_lab(results, _prefix)
 
 if errs:
