@@ -123,6 +123,10 @@ the app also saves each student's progress and gives each student a stable, uniq
 - **Completion roster** — when a student generates their completion code, it is also recorded to
   storage so an instructor can assemble a roster.
 
+### Performance with many simultaneous users
+
+The live “line running” playback is the main per-run cost on the server (it holds the session for a couple of seconds and streams the day-by-day frames). Each user can turn it off with the **Play the run animation** checkbox in the sidebar — unchecking it jumps straight to the results. For a large class, set the environment variable `JCC_ANIMATIONS=off` on the deployment to make the animation **off by default for everyone** (users can still turn it back on individually).
+
 Storage is enabled only when its secrets are set (`DB_ENCRYPTION_KEY` plus Dropbox credentials); it
 requires the `dropbox` and `cryptography` packages, which are listed in `requirements.txt`. **With no
 secrets set, every storage call is a safe no-op and the app runs exactly as it does standalone.**

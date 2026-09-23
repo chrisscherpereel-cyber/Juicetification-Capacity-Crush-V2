@@ -2,6 +2,7 @@
 import streamlit as st  # type: ignore[import]
 import pandas as pd  # type: ignore[import]
 import math
+import os
 import random
 import time
 import json
@@ -80,6 +81,13 @@ HOURS_PER_DAY = 8
 DAYS_PER_YEAR = 262
 HOURS_PER_YEAR = DAYS_PER_YEAR * HOURS_PER_DAY
 CAP_MIN, CAP_MAX = 0, 20
+
+# Whether the live "line running" playback is ON by default. Each user can flip it in the
+# sidebar, but an instructor expecting many simultaneous users can turn it OFF for everyone
+# by setting the environment variable JCC_ANIMATIONS=off (the playback is the main per-run
+# server cost: it holds the session for a couple of seconds and streams ~240 frames).
+ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "on").strip().lower() not in (
+    "0", "off", "false", "no", "disable", "disabled")
 SIDES_MIN, SIDES_MAX = 0, 100
 
 # ---- Per-station WIP (work-in-process) limit ----
@@ -541,6 +549,7 @@ def initialize_state():
     sd("demand_dice", DEFAULT_DEMAND_DICE)
     sd("demand_faces", DEFAULT_DEMAND_FACES)
     st.session_state.setdefault("anim_speed", "Normal")
+    st.session_state.setdefault("animate", ANIMATIONS_DEFAULT_ON)
     st.session_state.setdefault("sim_results", None)
     # WIP limits
     sd("wip_limit_on", DEFAULT_WIP_LIMIT_ON)
@@ -4690,6 +4699,19 @@ def render_lab(results, prefix):
         st.markdown(f'<div class="lab-setup"><b>The setup:</b> {_md_escape(step["setup"])}</div>',
                     unsafe_allow_html=True)
 
+        # Play the "line running" animation here, inside the lab panel, after any run in this
+        # lab (predict/estimate steps run from the button below; challenge steps run from the
+        # sidebar). Consuming it before the branch guarantees it always fires exactly once and
+        # is seen — the main-window playback would be above the panel and off-screen.
+        _lab_anim = st.session_state.pop("_lab_anim", None)
+        if _lab_anim and results:
+            _frames, _delay = _lab_anim
+            _anim_ph = st.empty()
+            for _fr in _frames:
+                _anim_ph.html(build_live_dashboard(_fr, results))
+                time.sleep(_delay)
+            _anim_ph.empty()
+
         challenge = step.get("challenge")
         if challenge:
             answered = _render_challenge(prefix, i, challenge, results)
@@ -5495,12 +5517,18 @@ with st.sidebar:
             min_value=1, max_value=MAX_YEARS, step=1, key="simulation_years",
             help=f"Each year is {DAYS_PER_YEAR} working days × {HOURS_PER_DAY} hours = "
                  f"{HOURS_PER_YEAR:,} dice rolls per operation.")
-        st.select_slider(
-            "Playback speed",
-            options=["Instant", "Fast", "Normal", "Slow"],
-            key="anim_speed",
-            help="How fast the live dashboard plays the days back. Instant skips straight to the "
-                 "finished results.")
+        st.checkbox(
+            "Play the run animation", key="animate",
+            help="Plays the line back day by day when you press Run. Uncheck for a faster, lighter "
+                 "run that jumps straight to the results — recommended when many people are using the "
+                 "app at the same time.")
+        if st.session_state.get("animate", True):
+            st.select_slider(
+                "Playback speed",
+                options=["Instant", "Fast", "Normal", "Slow"],
+                key="anim_speed",
+                help="How fast the live dashboard plays the days back. Instant skips straight to the "
+                     "finished results.")
 
     # ---- Variability switches (both modes) ----
     with st.container(border=True, key="var_card"):
@@ -5855,17 +5883,23 @@ if run_clicked and not errs:
             "years": int(st.session_state["simulation_years"]),
         }
     delay = SPEED_DELAY.get(st.session_state["anim_speed"], 0.03)
-    if full and delay > 0 and full["frames"]:
+    if st.session_state.get("animate", True) and full and delay > 0 and full["frames"]:
         frames = full["frames"]
         stride = max(1, len(frames) // MAX_ANIM_FRAMES)
         shown = frames[::stride]
         if shown[-1] is not frames[-1]:
             shown.append(frames[-1])
-        frame_ph = st.empty()
-        for fr in shown:
-            frame_ph.html(build_live_dashboard(fr, full))
-            time.sleep(delay)
-        frame_ph.empty()          # clear the animation; final dashboard renders below
+        if IS_LAB:
+            # In a guided lab the student clicks Run at the bottom of the lab panel, so an
+            # animation up here would play off-screen. Hand the frames to the lab panel, which
+            # plays them right below the Run button (see render_lab) so the line is actually seen.
+            st.session_state["_lab_anim"] = (shown, delay)
+        else:
+            frame_ph = st.empty()
+            for fr in shown:
+                frame_ph.html(build_live_dashboard(fr, full))
+                time.sleep(delay)
+            frame_ph.empty()          # clear the animation; final dashboard renders below
     st.session_state["sim_results"] = full
     st.session_state["run_counter"] = st.session_state.get("run_counter", 0) + 1
     results = full
