@@ -2166,28 +2166,77 @@ def _nav_bump():
     st.session_state["_nav_token"] = st.session_state.get("_nav_token", 0) + 1
 
 
+def _current_step_focus():
+    """The sidebar card a step wants the student to change (its challenge's `focus`), or None.
+    Used to scroll the sidebar to the right control when a configure-the-run step opens."""
+    if st.session_state.get("app_mode") != "Guided Lab":
+        return None
+    prefix = lab_prefix_from_choice(st.session_state.get("lab_choice", ""))
+    if prefix not in LABS:
+        return None
+    steps = LABS[prefix]["steps"]
+    i = st.session_state.get(f"{prefix}_step", 0)
+    if not (0 <= i < len(steps)):
+        return None
+    step = steps[i]
+    ch = step.get("challenge")
+    if isinstance(ch, dict) and ch.get("focus"):
+        return ch["focus"]
+    return step.get("focus")
+
+
 def _scroll_to_top_on_nav():
-    """Scroll the main view to the top exactly once after a navigation event. Fires only when
-    the nav token advanced (not on ordinary reruns like typing or running a step), so it never
-    fights the user while they scroll.
+    """After a navigation event (fired once, when the nav token advances — never on ordinary
+    reruns like typing or running a step): bring the main task panel to the top, and, when the
+    step asks the student to change a sidebar control, scroll the sidebar to that control and
+    flash it so it's easy to find.
 
     The nav token is embedded in the injected markup on purpose: Streamlit reuses an iframe
-    whose HTML is byte-identical across reruns and will NOT re-execute its <script>, so without
-    a changing value the scroll would only ever run the first time. Making the content unique
-    per navigation forces the iframe to remount and the scroll to run every time."""
+    whose HTML is byte-identical across reruns and will NOT re-execute its <script>, so making
+    the content unique per navigation forces the iframe to remount and the scroll to run."""
     tok = st.session_state.get("_nav_token", 0)
     if st.session_state.get("_nav_token_seen") == tok:
         return
     st.session_state["_nav_token_seen"] = tok
+    focus = _current_step_focus()
+    focus_sel = json.dumps(f".st-key-{focus}" if focus else "")
     components.html(
         f"""
         <script>
           (function () {{
             var navToken = {tok};  /* unique per navigation → forces re-execution */
             var doc = window.parent.document;
-            /* In a guided lab the tasks sit below the title and metrics, so bring the lab panel
-               itself to the top of the view (scroll-margin-top clears the Streamlit header).
-               In the sandbox there is no anchor, so fall back to the absolute top. */
+
+            /* 1) If this step asks the student to change a setting, scroll the sidebar to that
+                  card and flash it, so their eye lands on the right control. */
+            var focusSel = {focus_sel};
+            if (focusSel) {{
+              var card = doc.querySelector(focusSel);
+              if (card) {{
+                var scroller = card.parentElement;
+                while (scroller && scroller !== doc.body) {{
+                  var oy = window.parent.getComputedStyle(scroller).overflowY;
+                  if ((oy === 'auto' || oy === 'scroll') &&
+                      scroller.scrollHeight > scroller.clientHeight + 4) break;
+                  scroller = scroller.parentElement;
+                }}
+                if (scroller && scroller !== doc.body) {{
+                  var top = card.getBoundingClientRect().top
+                            - scroller.getBoundingClientRect().top + scroller.scrollTop - 12;
+                  try {{ scroller.scrollTo({{top: Math.max(0, top), behavior: 'smooth'}}); }}
+                  catch (e) {{ scroller.scrollTop = Math.max(0, top); }}
+                }} else {{
+                  try {{ card.scrollIntoView({{block: 'start', behavior: 'smooth'}}); }} catch (e) {{}}
+                }}
+                try {{
+                  card.style.transition = 'box-shadow .25s ease';
+                  card.style.boxShadow = '0 0 0 3px rgba(234,88,12,0.55)';
+                  setTimeout(function () {{ card.style.boxShadow = ''; }}, 1600);
+                }} catch (e) {{}}
+              }}
+            }}
+
+            /* 2) Bring the main task panel (guided lab) or the page top (sandbox) into view. */
             var anchor = doc.getElementById('jcc-labtop');
             if (anchor && anchor.scrollIntoView) {{
               try {{ anchor.scrollIntoView({{block: 'start', behavior: 'auto'}}); return; }}
@@ -4263,8 +4312,8 @@ LAB_CHALLENGES = {
         "setup": "Start: order size 10 — hardly any holding, but a fortune in ordering cost.",
         "apply": {**_eoqd_apply([1] * 6, 25.0, 0.04), "fin_order_size": 10},
         "tries": 3,
-        "hint": "Use EOQ = √(2·D·S ÷ H) — around 180 here. Set the order size near it in the "
-                "Order & holding card; the cost curve is flat, so you don't have to be exact.",
+        "hint": "Use EOQ = √(2·D·S ÷ H) — around 180 here. Set the order size near it — the "
+                "raw-material order size (📦, in the Variability card); the cost curve is flat, so you don't have to be exact.",
         "targets": [
             {"label": "Ordering + holding cost", "get": lambda r: _chal_eoq_cost(r)[0], "fmt": "${:,.0f}",
              "goal": "within 10% of best", "ok": lambda r: _chal_eoq_cost(r)[0] <= _chal_eoq_cost(r)[1] * 1.10},
@@ -4277,8 +4326,8 @@ LAB_CHALLENGES = {
         "setup": "Start: order size 10 — hardly any holding, but a fortune in ordering cost.",
         "apply": _eoq_apply(10, 100),
         "tries": 3,
-        "hint": "Use EOQ = √(2·D·S ÷ H) — around 180 here. Set the order size near it in the "
-                "Order & holding card; the cost curve is flat, so you don't have to be exact.",
+        "hint": "Use EOQ = √(2·D·S ÷ H) — around 180 here. Set the order size near it — the "
+                "raw-material order size (📦, in the Variability card); the cost curve is flat, so you don't have to be exact.",
         "targets": [
             {"label": "Ordering + holding cost", "get": lambda r: _chal_eoq_cost(r)[0], "fmt": "${:,.0f}",
              "goal": "within 10% of best", "ok": lambda r: _chal_eoq_cost(r)[0] <= _chal_eoq_cost(r)[1] * 1.10},
@@ -4301,6 +4350,24 @@ LAB_CHALLENGES = {
         ],
     },
 }
+
+# The sidebar card each challenge asks the student to change — used to scroll the sidebar to
+# that control (and briefly flash it) when the challenge opens, so the student knows where to
+# make the change.
+_LAB_CHAL_FOCUS = {
+    "ops": "wip_card", "little": "wip_card", "pull": "wip_card", "var": "settings_card",
+    "qual": "quality_card", "fin": "ops_card", "ta": "ops_card", "eoqd": "var_card",
+    "eoq": "var_card", "ss": "safety_card",
+}
+for _p, _f in _LAB_CHAL_FOCUS.items():
+    if _p in LAB_CHALLENGES:
+        LAB_CHALLENGES[_p]["focus"] = _f
+
+# Capstone fix steps (the diagnose→fix pairs) each point at the lever that fixes that case.
+_DIAG_FIX_FOCUS = {1: "ops_card", 3: "safety_card", 5: "quality_card", 7: "wip_card"}
+for _i, _f in _DIAG_FIX_FOCUS.items():
+    if _i < len(LAB_DIAG) and isinstance(LAB_DIAG[_i].get("challenge"), dict):
+        LAB_DIAG[_i]["challenge"]["focus"] = _f
 
 # Append each challenge as the final step of its lab (so it joins the road map, the
 # navigation, and the progress tracker automatically).
