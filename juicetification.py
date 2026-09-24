@@ -58,14 +58,24 @@ if store.enabled() and not _STORE_SID:
             st.rerun()
     st.stop()
 
-# Scenario seed: stable per student when identified (so the same student always gets the
-# same line), else the Director's ?seed= when provided, else fully random (unchanged).
-if _STORE_SID:
-    SCENARIO_SEED = store.derive_seed(_STORE_GAME, _STORE_SID)
-elif DIRECTOR_CTX.get("seed") is not None:
+# Scenario seed. An instructor-set Director ?seed= pins a fixed exercise for everyone;
+# otherwise every student gets their OWN random scenario (a unique result), assigned once and
+# kept in the URL as ?rs= so it stays stable across reruns and reloads while differing between
+# students. (The per-run counter added at run time then varies each repeat — see the run trigger.)
+if DIRECTOR_CTX.get("seed") is not None:
     SCENARIO_SEED = DIRECTOR_CTX["seed"]
 else:
-    SCENARIO_SEED = None
+    _rs = st.query_params.get("rs")
+    try:
+        SCENARIO_SEED = int(_rs) if _rs not in (None, "") else None
+    except (TypeError, ValueError):
+        SCENARIO_SEED = None
+    if SCENARIO_SEED is None:
+        SCENARIO_SEED = random.randint(1, 1_000_000_000)
+        try:
+            st.query_params["rs"] = str(SCENARIO_SEED)
+        except Exception:
+            pass
 
 # =========================================================
 # Defaults
@@ -2160,10 +2170,12 @@ LAB_OPS = [
 ]
 
 
-def _nav_bump():
-    """Mark that a screen change just happened, so the page scrolls back to the top once on
-    the resulting rerun (see _scroll_to_top_on_nav). Called from the navigation callbacks."""
+def _nav_bump(target="lab"):
+    """Queue a one-time scroll on the next rerun. target: 'lab' (bring the task panel to the
+    top, after Prev/Next/lab change), 'run' (after a run — bring the setup+result into view and
+    flash the panel so a change is obvious), or 'sidebar' (jump the sidebar to the setup)."""
     st.session_state["_nav_token"] = st.session_state.get("_nav_token", 0) + 1
+    st.session_state["_nav_target"] = target
 
 
 def _current_step_focus():
@@ -2186,30 +2198,36 @@ def _current_step_focus():
 
 
 def _scroll_to_top_on_nav():
-    """After a navigation event (fired once, when the nav token advances — never on ordinary
-    reruns like typing or running a step): bring the main task panel to the top, and, when the
-    step asks the student to change a sidebar control, scroll the sidebar to that control and
-    flash it so it's easy to find.
-
-    The nav token is embedded in the injected markup on purpose: Streamlit reuses an iframe
-    whose HTML is byte-identical across reruns and will NOT re-execute its <script>, so making
-    the content unique per navigation forces the iframe to remount and the scroll to run."""
+    """Fire a one-time scroll after a nav/run/sidebar event (once per nav-token advance — never
+    on ordinary reruns). The nav token is embedded in the markup on purpose: Streamlit reuses an
+    iframe whose HTML is byte-identical across reruns and won't re-run its <script>, so a unique
+    value per event forces the remount that actually performs the scroll."""
     tok = st.session_state.get("_nav_token", 0)
     if st.session_state.get("_nav_token_seen") == tok:
         return
     st.session_state["_nav_token_seen"] = tok
+    target = st.session_state.get("_nav_target", "lab")
     focus = _current_step_focus()
-    focus_sel = json.dumps(f".st-key-{focus}" if focus else "")
+    if target == "sidebar":
+        focus_sel = json.dumps(f".st-key-{focus or 'ops_card'}")   # jump to the line editor by default
+        main_anchor = json.dumps("")
+    elif target == "run":
+        focus_sel = json.dumps("")                                 # don't move the sidebar on a run
+        main_anchor = json.dumps("jcc-runtop")
+    else:  # "lab"
+        focus_sel = json.dumps(f".st-key-{focus}" if focus else "")
+        main_anchor = json.dumps("jcc-labtop")
     components.html(
         f"""
         <script>
           (function () {{
-            var navToken = {tok};  /* unique per navigation → forces re-execution */
+            var navToken = {tok};  /* unique per event → forces re-execution */
             var doc = window.parent.document;
-
-            /* 1) If this step asks the student to change a setting, scroll the sidebar to that
-                  card and flash it, so their eye lands on the right control. */
             var focusSel = {focus_sel};
+            var mainAnchor = {main_anchor};
+            var isRun = {json.dumps(target == "run")};
+
+            /* Sidebar: bring the setup control into view and flash it. */
             if (focusSel) {{
               var card = doc.querySelector(focusSel);
               if (card) {{
@@ -2230,27 +2248,40 @@ def _scroll_to_top_on_nav():
                 }}
                 try {{
                   card.style.transition = 'box-shadow .25s ease';
-                  card.style.boxShadow = '0 0 0 3px rgba(234,88,12,0.55)';
+                  card.style.boxShadow = '0 0 0 3px rgba(234,88,12,0.6)';
                   setTimeout(function () {{ card.style.boxShadow = ''; }}, 1600);
                 }} catch (e) {{}}
               }}
             }}
 
-            /* 2) Bring the main task panel (guided lab) or the page top (sandbox) into view. */
-            var anchor = doc.getElementById('jcc-labtop');
-            if (anchor && anchor.scrollIntoView) {{
-              try {{ anchor.scrollIntoView({{block: 'start', behavior: 'auto'}}); return; }}
-              catch (e) {{}}
+            /* Main: bring the requested anchor to the top (fallback: absolute top). */
+            if (mainAnchor) {{
+              var a = doc.getElementById(mainAnchor);
+              if (a && a.scrollIntoView) {{
+                try {{ a.scrollIntoView({{block: 'start', behavior: 'auto'}}); }} catch (e) {{}}
+              }} else {{
+                var sels = ['section.main', '[data-testid="stMain"]',
+                            '[data-testid="stAppViewContainer"]', '.stMainBlockContainer'];
+                for (var i = 0; i < sels.length; i++) {{
+                  var el = doc.querySelector(sels[i]);
+                  if (el) {{ try {{ el.scrollTo({{top: 0, left: 0, behavior: 'auto'}}); }}
+                            catch (e) {{ el.scrollTop = 0; }} }}
+                }}
+                try {{ (doc.scrollingElement || doc.documentElement).scrollTop = 0; }} catch (e) {{}}
+                try {{ window.parent.scrollTo(0, 0); }} catch (e) {{}}
+              }}
             }}
-            var sels = ['section.main', '[data-testid="stMain"]',
-                        '[data-testid="stAppViewContainer"]', '.stMainBlockContainer'];
-            for (var i = 0; i < sels.length; i++) {{
-              var el = doc.querySelector(sels[i]);
-              if (el) {{ try {{ el.scrollTo({{top: 0, left: 0, behavior: 'auto'}}); }}
-                        catch (e) {{ el.scrollTop = 0; }} }}
+
+            /* After a run, flash the task panel so it's obvious a fresh result arrived — even
+               with the animation turned off and even if the numbers look similar. */
+            if (isRun) {{
+              var panel = doc.querySelector('.st-key-lab_card');
+              if (panel) {{ try {{
+                panel.style.transition = 'box-shadow .18s ease';
+                panel.style.boxShadow = '0 0 0 3px rgba(234,88,12,0.5)';
+                setTimeout(function () {{ panel.style.boxShadow = ''; }}, 950);
+              }} catch (e) {{}} }}
             }}
-            try {{ (doc.scrollingElement || doc.documentElement).scrollTop = 0; }} catch (e) {{}}
-            try {{ window.parent.scrollTo(0, 0); }} catch (e) {{}}
           }})();
         </script>
         """,
@@ -2331,6 +2362,14 @@ def lab_setup_and_run(prefix):
         st.session_state[k] = v
     st.session_state["anim_speed"] = "Fast"
     st.session_state["lab_autorun"] = True
+    # After the run, scroll the fresh result into view and flash the panel — so it's obvious
+    # something happened even with the animation off.
+    _nav_bump("run")
+
+
+def _focus_sidebar_cb():
+    """The 'go to the setup' button: jump the sidebar to the step's control (or the line editor)."""
+    _nav_bump("sidebar")
 
 
 # ---- Economics lab: the P&L behind the line ----
@@ -4765,6 +4804,12 @@ def render_lab(results, prefix):
         st.markdown(f'<div class="lab-intro">{_md_escape(step["intro"])}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="lab-setup"><b>The setup:</b> {_md_escape(step["setup"])}</div>',
                     unsafe_allow_html=True)
+        # Anchor + button: the button jumps the sidebar to the setup controls; the anchor is
+        # where the view lands after a run, so the fresh result sits just below it.
+        st.markdown('<div id="jcc-runtop" style="scroll-margin-top: 5rem;"></div>',
+                    unsafe_allow_html=True)
+        st.button("🎛️  Go to the setup controls in the sidebar  ↙",
+                  key=f"{prefix}_focus_{i}", on_click=_focus_sidebar_cb, use_container_width=True)
 
         # Play the "line running" animation here, inside the lab panel, after any run in this
         # lab (predict/estimate steps run from the button below; challenge steps run from the
@@ -4782,7 +4827,8 @@ def render_lab(results, prefix):
         challenge = step.get("challenge")
         if challenge:
             answered = _render_challenge(prefix, i, challenge, results)
-            _lockword = "Solve the challenge"
+            _lock_msg = ("Meet the goal above to unlock the next step — each run counts as one of "
+                         "your three tries, so you can move on once you pass or run out of tries.")
         else:
             est_cfg = step.get("estimate")
             if est_cfg:
@@ -4854,21 +4900,22 @@ def render_lab(results, prefix):
                 elif _diag:
                     st.info("👀 Study the dashboard below — **output, WIP, service level, and yield** — "
                             "then pick your diagnosis above.")
-            else:
-                if step.get("diagnose"):
-                    st.caption("Press **Set up & run this step** to run this line, study the dashboard "
-                               "that appears below, then pick your diagnosis above.")
-                else:
-                    _verb = "estimate" if est_cfg else "prediction"
-                    st.caption(f"Make your {_verb}, then press **Set up & run this step**. The result "
-                               "and the full dashboard appear below.")
 
+            # To advance you must both run the step and commit an answer. Build a plain-language
+            # list of whatever's still missing so it's obvious what "Next" is waiting for.
             if est_cfg:
-                answered = st.session_state.get(f"{prefix}_est_{i}") is not None
-                _lockword = "Enter your estimate"
+                _engaged = st.session_state.get(f"{prefix}_est_{i}") is not None
+                _eng_todo = "<b>enter your estimate above</b>"
             else:
-                answered = st.session_state.get(f"{prefix}_pred_{i}") is not None
-                _lockword = "Pick your diagnosis" if step.get("diagnose") else "Choose your prediction"
+                _engaged = st.session_state.get(f"{prefix}_pred_{i}") is not None
+                _eng_todo = ("<b>pick your diagnosis above</b>" if step.get("diagnose")
+                             else "<b>make your prediction above</b>")
+            answered = _engaged and matched
+            _run_todo = "press <b>▶ Set up &amp; run this step</b>"
+            _pairs = ([(_run_todo, not matched), (_eng_todo, not _engaged)] if step.get("diagnose")
+                      else [(_eng_todo, not _engaged), (_run_todo, not matched)])
+            _todo = [t for t, need in _pairs if need]
+            _lock_msg = ("To continue, " + " then ".join(_todo) + ".") if _todo else None
         last = len(steps) - 1
         nav1, nav2, nav3 = st.columns([1, 1, 1])
         nav1.button("‹ Previous", use_container_width=True, disabled=(i == 0),
@@ -4880,8 +4927,9 @@ def render_lab(results, prefix):
                     on_click=lab_goto, args=(prefix, i + 1), key=f"{prefix}_next_{i}")
 
         if i < last:
-            if not answered:
-                st.caption(f"🔒 {_lockword} above to unlock the next step.")
+            if not answered and _lock_msg:
+                st.markdown(f'<div class="lab-lock">🔒 <b>The next step is locked.</b> {_lock_msg}</div>',
+                            unsafe_allow_html=True)
         else:
             # Final step. Once it's resolved, mark_step_done (above) has recorded it, so the
             # whole lab now counts as complete — confirm that and steer to what's next.
@@ -5078,6 +5126,10 @@ SHOW_FLOWTIME = (not IS_LAB) or (LAB_PREFIX in ("ops", "var", "little", "pull", 
 SHOW_SAFETY = (not IS_LAB) or (LAB_PREFIX in ("ss", "diag"))
 SHOW_QUALITY = (not IS_LAB) or (LAB_PREFIX in ("qual", "diag"))
 IS_EOQ_LAB = IS_LAB and LAB_PREFIX in ("eoq", "eoqd")
+# The per-operation panel and the WIP/output charts belong to the labs about the line's
+# physical flow. The money / cost / service labs have their own focused result cards, so
+# hide the flow charts there (and the planned-line metrics strip) to keep the panel clean.
+SHOW_LINE_DETAIL = (not IS_LAB) or (LAB_PREFIX in ("ops", "little", "pull", "var", "qual", "diag"))
 
 
 # =========================================================
@@ -5153,6 +5205,24 @@ st.markdown(
         div[data-testid="stNumberInput"] div[data-baseweb="input"]:focus-within {
             border-color: #ea580c; box-shadow: 0 0 0 3px rgba(234,88,12,0.16);
         }
+
+        /* ---------- Make editable fields obviously input-like ---------- */
+        div[data-testid="stNumberInput"] div[data-baseweb="input"],
+        div[data-testid="stTextInput"] div[data-baseweb="input"],
+        div[data-testid="stTextInput"] div[data-baseweb="base-input"] {
+            border-width: 1.6px; border-color: #adbbde; background: #f7f9ff;
+        }
+        div[data-testid="stNumberInput"] div[data-baseweb="input"]:hover,
+        div[data-testid="stTextInput"] div[data-baseweb="input"]:hover { border-color: #ea580c; }
+        div[data-testid="stTextInput"] input { font-weight: 600; color: #1f2a44; }
+        /* Toggles/sliders read as controls: give their labels a touch more weight */
+        div[data-testid="stToggle"] label p, div[data-testid="stSlider"] label p { font-weight: 600; }
+
+        /* ---------- "The next step is locked" explainer ---------- */
+        .lab-lock { background: #fff8e6; border: 1px solid #fde3a7; border-left: 5px solid #f59e0b;
+            border-radius: 9px; padding: 10px 14px; margin-top: 10px; color: #8a5300;
+            font-size: 0.92rem; font-weight: 500; line-height: 1.4; }
+        .lab-lock b { color: #7a3e00; }
 
         /* ---------- Up/down spinner buttons inside the operations card ---------- */
         .st-key-ops_card div[data-testid="stButton"] > button {
@@ -5869,14 +5939,17 @@ exp_max = [c * s if a else 0 for c, s, a in zip(caps, sides, active)]
 active_exp = [e for e, a in zip(exp_avg, active) if a]
 design_bottleneck = min(active_exp) if active_exp else 0.0
 
-d1, d2, d3, d4 = st.columns(4)
-d1.metric("Active operations", sum(active))
-d2.metric("Total dice in line", sum(caps))
-d3.metric("Hours to simulate",
-          f"{int(st.session_state['simulation_years']) * HOURS_PER_YEAR:,}")
-d4.metric("Slowest station avg / hr", f"{design_bottleneck:g}" if design_bottleneck else "—",
-          help="The slowest station's average output. It sets the pace for the whole line — this is "
-               "the bottleneck (the constraint).")
+# The planned-line summary is sandbox context; in a lab the step already sets the line and
+# the results below report the constraint, so it's just noise there.
+if not IS_LAB:
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Active operations", sum(active))
+    d2.metric("Total dice in line", sum(caps))
+    d3.metric("Hours to simulate",
+              f"{int(st.session_state['simulation_years']) * HOURS_PER_YEAR:,}")
+    d4.metric("Slowest station avg / hr", f"{design_bottleneck:g}" if design_bottleneck else "—",
+              help="The slowest station's average output. It sets the pace for the whole line — this is "
+                   "the bottleneck (the constraint).")
 
 # ---- Run trigger: simulate, then play every output back live into a placeholder ----
 SPEED_DELAY = {"Instant": 0.0, "Fast": 0.012, "Normal": 0.03, "Slow": 0.07}
@@ -5894,10 +5967,12 @@ if run_clicked and not errs:
             if st.session_state.get("reorder_point_on") else None)
     _scrap = ([st.session_state.get(f"scrap_pct_{i}", 0) / 100.0 for i in range(N_OPS)]
               if st.session_state.get("scrap_on") else None)
-    # Seed the run from the student's stable scenario seed when one exists (identified
-    # student → derived seed; else Director ?seed=; else None = fully random, as before).
+    # Seed the run so a student's scenario is reproducible, but advance it every run so that
+    # re-running the same line shows fresh variability (the whole point of the dice game) rather
+    # than an identical result. run_counter starts at 0, so a student's/section's *first* run is
+    # still identical for fair setup; each repeat draws a new (but deterministic) sample.
     if SCENARIO_SEED is not None:
-        random.seed(SCENARIO_SEED)
+        random.seed(SCENARIO_SEED + int(st.session_state.get("run_counter", 0)))
     full = run_simulation(
         caps, sides,
         int(st.session_state["starting_inventory"]),
@@ -6094,36 +6169,37 @@ else:
                        f"good-output ceiling is ≈ {_ceil:,.0f} bottles, well below what nominal speeds "
                        f"suggest. A station's real capacity is its speed × its yield.")
 
-    with st.container(border=True, key="opdetail_card"):
-        st.markdown('<div class="card-title">Per-operation results</div>', unsafe_allow_html=True)
-        st.markdown('<div class="card-sub">Green bar = bottles of inventory left waiting in front of '
-                    'each operation at the end; boxes show that station\'s hourly averages over the '
-                    'whole run. Inventory piles up in front of the constraint.</div>',
-                    unsafe_allow_html=True)
-        st.html(render_op_panel(
-            results["op_detail"], results["bottleneck_label"],
-            raw_inv=(results.get("end_raw", results.get("raw_series", [0])[-1] if results.get("raw_series") else 0)
-                     if results.get("show_raw", True) else None),
-            fgi=(results.get("end_fgi", 0) if results.get("show_fgi", results.get("demand_on")) else None),
-        ))
+    if SHOW_LINE_DETAIL:
+        with st.container(border=True, key="opdetail_card"):
+            st.markdown('<div class="card-title">Per-operation results</div>', unsafe_allow_html=True)
+            st.markdown('<div class="card-sub">Green bar = bottles of inventory left waiting in front of '
+                        'each operation at the end; boxes show that station\'s hourly averages over the '
+                        'whole run. Inventory piles up in front of the constraint.</div>',
+                        unsafe_allow_html=True)
+            st.html(render_op_panel(
+                results["op_detail"], results["bottleneck_label"],
+                raw_inv=(results.get("end_raw", results.get("raw_series", [0])[-1] if results.get("raw_series") else 0)
+                         if results.get("show_raw", True) else None),
+                fgi=(results.get("end_fgi", 0) if results.get("show_fgi", results.get("demand_on")) else None),
+            ))
 
-    with st.container(border=True, key="results_card"):
-        st.markdown('<div class="card-title">Cumulative bottles finished</div>', unsafe_allow_html=True)
-        st.line_chart(results["df_cum"], height=240)
+        with st.container(border=True, key="results_card"):
+            st.markdown('<div class="card-title">Cumulative bottles finished</div>', unsafe_allow_html=True)
+            st.line_chart(results["df_cum"], height=240)
 
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            st.markdown('<div class="card-title">Total WIP over time</div>', unsafe_allow_html=True)
-            st.line_chart(results["df_wip"], height=220)
-        with cc2:
-            st.markdown('<div class="card-title">Ending WIP by station</div>', unsafe_allow_html=True)
-            if len(results["df_end"]) > 0:
-                st.bar_chart(results["df_end"], height=220)
-            else:
-                st.info("Single-station line — no inter-station WIP.")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.markdown('<div class="card-title">Total WIP over time</div>', unsafe_allow_html=True)
+                st.line_chart(results["df_wip"], height=220)
+            with cc2:
+                st.markdown('<div class="card-title">Ending WIP by station</div>', unsafe_allow_html=True)
+                if len(results["df_end"]) > 0:
+                    st.bar_chart(results["df_end"], height=220)
+                else:
+                    st.info("Single-station line — no inter-station WIP.")
 
-    with st.expander("Bottles finished each day"):
-        st.line_chart(results["df_daily"], height=220)
+        with st.expander("Bottles finished each day"):
+            st.line_chart(results["df_daily"], height=220)
 
     # ---- Inventory at the ends of the line — raw material and finished goods on
     #      their own charts (raw always; finished goods only when demand fluctuates) ----

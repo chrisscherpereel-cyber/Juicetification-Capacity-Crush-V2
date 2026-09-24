@@ -117,7 +117,7 @@ the app also saves each student's progress and gives each student a stable, uniq
   there is no gate and nothing changes.
 - **Automatic save/resume** — completed steps, reflections, challenge results, and lab position are
   written to encrypted per-student files after each meaningful step, and restored on load.
-- **Stable per-student scenario** — the run seed is derived deterministically from the student ID, so
+- **Unique per-student scenario** — each student gets their own random scenario seed (kept in the page URL as `?rs=`), so every student sees a different line and re-running shows fresh variability. A Director `?seed=` still overrides this to pin one fixed exercise for the whole class.
   the same student always faces the same line (and different students get different ones). This takes
   priority over the Director's `?seed=`; with neither, runs stay fully random.
 - **Completion roster** — when a student generates their completion code, it is also recorded to
