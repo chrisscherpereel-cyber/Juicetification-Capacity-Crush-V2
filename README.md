@@ -49,8 +49,8 @@ and then has to engineer** — which is where the idea actually lands.
 - **Open design challenges** with an automated pass/fail check and limited tries.
 - **Self-explanation prompts** after the key reveals; the count is folded into a tamper-evident
   completion code.
-- **Progress tracking & completion codes** — students generate a checksum-protected code; instructors
-  decode it to see per-lab completion and how many explanations were written.
+- **Per-part progress & submission reports** — the 11 labs form two parts (Part 1 default, Part 2
+  selectable); each part produces a downloadable HTML report of the student's work to upload to the LMS.
 
 ---
 
@@ -79,9 +79,13 @@ Streamlit will open the simulation in your browser (usually at http://localhost:
   `instructions.pdf` for a one-page visual guide.
 - **Progress is stored in the page URL**, so a student can bookmark or copy the link to resume.
   Work runs entirely in the browser session — no accounts, no server-side data.
-- **To collect work**, have each student open **Your progress → Get my completion code** and submit
-  the generated code. Instructors decode it inside the same panel (paste the code into the decoder)
-  to see per-lab completion, overall percentage, and the number of self-explanations written.
+- **Two parts, two assignments.** The 11 labs are split into **Part 1 — Constraints & Flow** (default)
+  and **Part 2 — Economics & Inventory**, chosen at the top of the sidebar. Each part is submitted
+  separately.
+- **To collect work**, have each student open **Your progress → Get my report to submit**, enter their
+  name, and **download the HTML report** for that part — then upload it to the matching LMS assignment
+  (it lists completed labs, design-challenge outcomes, and their self-explanations; it prints to PDF
+  from the browser if the LMS requires PDF). There is no completion code to copy.
 - **Everything is instructor-controllable**: the lab sequence, the difficulty of each challenge, and
   the number of tries are all defined in `juicetification.py`.
 

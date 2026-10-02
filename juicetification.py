@@ -4,6 +4,7 @@ import pandas as pd  # type: ignore[import]
 import math
 import os
 import random
+import re
 import time
 import json
 import base64
@@ -271,6 +272,24 @@ LAB_CHOICE_LABEL = {
     "ss": "Safety Stock · Reorder point & service level",
     "diag": "Capstone · Diagnose & Fix (no labels)",
 }
+
+# The 11 labs are split into two assignments. Part 1 (default) covers the physical line —
+# constraints, flow and quality, capped by the diagnostic capstone. Part 2 is the economics
+# and inventory-policy extension. Each part is submitted separately via its own report.
+LAB_PART_ORDER = ["Part 1 — Constraints & Flow", "Part 2 — Economics & Inventory"]
+LAB_PARTS = {
+    "Part 1 — Constraints & Flow": ["ops", "little", "pull", "var", "qual", "diag"],
+    "Part 2 — Economics & Inventory": ["fin", "ta", "eoqd", "eoq", "ss"],
+}
+
+def _part_labs(part):
+    return LAB_PARTS.get(part, LAB_PARTS[LAB_PART_ORDER[0]])
+
+def _part_of_lab(prefix):
+    for part, labs in LAB_PARTS.items():
+        if prefix in labs:
+            return part
+    return LAB_PART_ORDER[0]
 _CODE_SALT = "juice-bottling-lab-v1"
 
 
@@ -482,6 +501,12 @@ def lab_is_complete(prefix):
     return len(prog.get(prefix, set()) & set(range(n))) == n
 
 
+def part_complete(part):
+    """True when every lab in the given part has been fully completed."""
+    labs = [p for p in _part_labs(part) if p in LABS]
+    return bool(labs) and all(lab_is_complete(p) for p in labs)
+
+
 def all_labs_complete():
     """True when every lab in the course has been fully completed."""
     labs = [p for p in LAB_ORDER if p in LABS]
@@ -489,9 +514,10 @@ def all_labs_complete():
 
 
 def next_incomplete_lab(after_prefix):
-    """The next lab (in course order, wrapping around) that still has unfinished steps.
-    Returns None when everything is done."""
-    order = [p for p in LAB_ORDER if p in LABS]
+    """The next lab within the SAME part (wrapping around) that still has unfinished steps.
+    Returns None when the part is done."""
+    part = _part_of_lab(after_prefix)
+    order = [p for p in _part_labs(part) if p in LABS]
     if after_prefix in order:
         k = order.index(after_prefix)
         seq = order[k + 1:] + order[:k + 1]
@@ -503,40 +529,108 @@ def next_incomplete_lab(after_prefix):
     return None
 
 
-def make_completion_code(name):
-    """Build a paste-able completion record: a readable summary plus a tamper-evident code
-    (base64 payload + short salted checksum). Not cryptographically strong — enough to make
-    casual edits fail the check for participation-credit purposes."""
-    rows, total_done, total_steps, pct = progress_summary()
-    labs = {pre: [done, n] for pre, _lbl, done, n in rows}
-    rdone, rtotal = reflect_totals()
-    payload = {"v": 1, "n": (name or "").strip()[:60], "labs": labs,
-               "done": total_done, "total": total_steps, "pct": pct,
-               "refl": [rdone, rtotal],
-               "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    b64 = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
-    chk = hashlib.sha256((raw + _CODE_SALT).encode()).hexdigest()[:6]
-    return payload, f"JLAB1-{b64}-{chk}"
+def _report_data(part):
+    """Collect what the student did across a part's labs, for the submission report."""
+    prog = _get_progress()
+    ss = st.session_state
+    out = {"labs": [], "steps_done": 0, "steps_total": 0, "labs_done": 0, "labs_total": 0,
+           "refl_written": 0, "refl_total": 0}
+    for pre in _part_labs(part):
+        if pre not in LABS:
+            continue
+        steps = LABS[pre]["steps"]
+        n = len(steps)
+        d = len(prog.get(pre, set()) & set(range(n)))
+        out["steps_total"] += n
+        out["steps_done"] += d
+        out["labs_total"] += 1
+        complete = (n > 0 and d >= n)
+        if complete:
+            out["labs_done"] += 1
+        refls, chal = [], None
+        for i, s in enumerate(steps):
+            if s.get("reflect"):
+                out["refl_total"] += 1
+                txt = (ss.get(f"{pre}_reflect_{i}") or "").strip()
+                if txt:
+                    out["refl_written"] += 1
+                refls.append((s["reflect"], txt))
+            if s.get("challenge"):
+                chal = {"passed": bool(ss.get(f"{pre}_chal_passed_{i}", False)),
+                        "attempts": int(ss.get(f"{pre}_chal_attempts_{i}", 0) or 0),
+                        "done": i in prog.get(pre, set())}
+        out["labs"].append({"name": LAB_SHORT.get(pre, pre), "label": LAB_CHOICE_LABEL.get(pre, pre),
+                            "done": d, "total": n, "complete": complete,
+                            "reflections": refls, "challenge": chal})
+    return out
 
 
-def decode_completion_code(code):
-    """Instructor side: validate and unpack a completion code. Returns (payload, valid)."""
-    try:
-        parts = (code or "").strip().split("-")
-        if len(parts) < 3 or parts[0] != "JLAB1":
-            return None, False
-        chk = parts[-1]
-        b64 = "-".join(parts[1:-1])
-        raw = base64.urlsafe_b64decode((b64 + "=" * (-len(b64) % 4)).encode()).decode()
-        payload = json.loads(raw)
-        good = hashlib.sha256((raw + _CODE_SALT).encode()).hexdigest()[:6] == chk
-        # Re-serialize with sort_keys to match how the checksum was generated.
-        raw2 = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        good = good or hashlib.sha256((raw2 + _CODE_SALT).encode()).hexdigest()[:6] == chk
-        return payload, good
-    except Exception:
-        return None, False
+def build_part_report_html(part, student_name):
+    """A self-contained HTML report of a student's work on one part, for LMS upload."""
+    def esc(x):
+        return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    d = _report_data(part)
+    name = esc((student_name or "").strip() or "(name not entered)")
+    ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    secs = []
+    for L in d["labs"]:
+        badge = ("done" if L["complete"] else ("part" if L["done"] else "none"))
+        badge_txt = ("Complete" if L["complete"] else (f"{L['done']}/{L['total']} steps" if L["done"] else "Not started"))
+        ch = ""
+        if L["challenge"]:
+            c = L["challenge"]
+            cs = ("passed ✓" if c["passed"] else (f"attempted ({c['attempts']} tries)" if c["attempts"] else "not attempted"))
+            ch = f'<div class="ch">Design challenge: <b>{cs}</b></div>'
+        rfl = ""
+        if L["reflections"]:
+            items = []
+            for q, a in L["reflections"]:
+                a_html = f'<div class="ans">{esc(a)}</div>' if a else '<div class="ans none">— not written —</div>'
+                items.append(f'<div class="refl"><div class="q">{esc(q)}</div>{a_html}</div>')
+            rfl = '<div class="refls"><div class="rh">Self-explanations</div>' + "".join(items) + "</div>"
+        secs.append(
+            f'<div class="lab"><div class="labhead"><span class="labname">{esc(L["label"])}</span>'
+            f'<span class="pill {badge}">{badge_txt}</span></div>{ch}{rfl}</div>')
+    pct = round(100 * d["steps_done"] / d["steps_total"]) if d["steps_total"] else 0
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Capacity Crush — {esc(part)} — {name}</title>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color:#1f2a44;
+         max-width: 820px; margin: 32px auto; padding: 0 20px; line-height: 1.5; }}
+  h1 {{ font-size: 1.4rem; margin: 0 0 2px; }}
+  .sub {{ color:#5b6472; margin-bottom: 18px; }}
+  .meta {{ background:#f4f5f9; border:1px solid #e4e7ec; border-radius:10px; padding:12px 16px; margin-bottom:18px; }}
+  .meta b {{ color:#1f2a44; }}
+  .summary {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }}
+  .stat {{ flex:1; min-width:120px; background:#fff; border:1px solid #e4e7ec; border-left:4px solid #ea580c;
+          border-radius:9px; padding:10px 14px; }}
+  .stat .n {{ font-size:1.5rem; font-weight:800; }}
+  .stat .l {{ color:#5b6472; font-size:.82rem; }}
+  .lab {{ border:1px solid #e4e7ec; border-radius:10px; padding:12px 16px; margin-bottom:12px; }}
+  .labhead {{ display:flex; justify-content:space-between; align-items:center; }}
+  .labname {{ font-weight:700; }}
+  .pill {{ font-size:.76rem; font-weight:700; padding:3px 10px; border-radius:999px; }}
+  .pill.done {{ background:#eafaf0; color:#15803d; }} .pill.part {{ background:#fff8e6; color:#8a5300; }}
+  .pill.none {{ background:#f1f3f7; color:#8a93a6; }}
+  .ch {{ margin-top:6px; font-size:.9rem; color:#334155; }}
+  .refls {{ margin-top:10px; }} .rh {{ font-weight:700; font-size:.85rem; color:#5b6472; margin-bottom:4px; }}
+  .refl {{ margin:8px 0; }} .q {{ font-size:.88rem; color:#475569; }}
+  .ans {{ background:#eef2ff; border:1px solid #c7d2fe; border-radius:7px; padding:7px 10px; margin-top:3px; }}
+  .ans.none {{ background:#fff5f5; border-color:#fecaca; color:#b42318; }}
+  footer {{ color:#8a93a6; font-size:.78rem; margin-top:22px; border-top:1px solid #e4e7ec; padding-top:10px; }}
+</style></head><body>
+<h1>🧃 Juicetification: Capacity Crush</h1>
+<div class="sub">{esc(part)} — submission report</div>
+<div class="meta"><b>Student:</b> {name} &nbsp;·&nbsp; <b>Generated:</b> {ts}</div>
+<div class="summary">
+  <div class="stat"><div class="n">{d['labs_done']}/{d['labs_total']}</div><div class="l">labs complete</div></div>
+  <div class="stat"><div class="n">{d['steps_done']}/{d['steps_total']}</div><div class="l">steps done ({pct}%)</div></div>
+  <div class="stat"><div class="n">{d['refl_written']}/{d['refl_total']}</div><div class="l">self-explanations written</div></div>
+</div>
+{"".join(secs)}
+<footer>Generated by Juicetification: Capacity Crush. This report records the student's work on this
+part (labs completed, design-challenge outcomes, and self-explanations) for upload to the course LMS.</footer>
+</body></html>"""
 
 
 def initialize_state():
@@ -588,6 +682,7 @@ def initialize_state():
     st.session_state.setdefault("ss_step", 0)
     st.session_state.setdefault("qual_step", 0)
     st.session_state.setdefault("diag_step", 0)
+    st.session_state.setdefault("lab_part", LAB_PART_ORDER[0])
     st.session_state.setdefault("run_counter", 0)
     # Navigation tokens for the scroll-to-top-on-nav behavior (equal on first load → no scroll
     # until a real navigation event advances the token).
@@ -2299,6 +2394,13 @@ def lab_apply_setup(prefix, idx=None, force_reset=False):
     reset_line_to_defaults()                       # clean slate (also clears the last run)
     for k, v in steps[idx]["apply"].items():
         st.session_state[k] = v
+        # The financial inputs (order cost, holding cost, …) are drawn through fin_number_input,
+        # which mirrors each value under a widget-prefixed key and writes it back. If we only set
+        # the canonical key, that stale mirror overwrites it on the next render — so a step that
+        # changes the order/holding cost silently has no effect. Drop the mirrors so the widgets
+        # re-initialize from the value we just applied.
+        st.session_state.pop(f"sb_{k}", None)
+        st.session_state.pop(f"w_{k}", None)
     st.session_state["sim_results"] = None
     if steps[idx].get("challenge"):
         # A challenge that's already been resolved (recorded in progress) keeps its pass/try
@@ -2336,6 +2438,16 @@ def lab_on_choice_change():
     _autosave()
 
 
+def lab_on_part_change():
+    """Switching Part 1 ↔ Part 2 jumps to the first lab of the chosen part."""
+    part = st.session_state.get("lab_part", LAB_PART_ORDER[0])
+    first = _part_labs(part)[0]
+    st.session_state["lab_choice"] = LAB_CHOICE_LABEL[first]
+    lab_apply_setup(first)
+    _nav_bump()
+    _autosave()
+
+
 def lab_go_to_lab(prefix):
     """Jump straight to another lab (used by the 'next lab' button on the completion
     screen). Sets the sidebar picker to match and opens that lab at its first step."""
@@ -2360,6 +2472,8 @@ def lab_setup_and_run(prefix):
     step = steps[st.session_state[f"{prefix}_step"]]
     for k, v in step["apply"].items():
         st.session_state[k] = v
+        st.session_state.pop(f"sb_{k}", None)   # see lab_apply_setup: let fin widgets re-sync
+        st.session_state.pop(f"w_{k}", None)
     st.session_state["anim_speed"] = "Fast"
     st.session_state["lab_autorun"] = True
     # After the run, scroll the fresh result into view and flash the panel — so it's obvious
@@ -2402,7 +2516,9 @@ def _rev_costs(r):
             f"**{big[0]} cost** at **${big[1]:,.0f}** — the capital tied up in six precision dice.) "
             f"Revenue **${f['revenue']:,.0f}** − costs **${f['total_cost']:,.0f}** = "
             f"**${f['profit']:,.0f}** profit, a thin **{f['margin']:.1f}%** margin — so small "
-            f"operational changes swing the bottom line hard.")
+            f"operational changes swing the bottom line hard. (The two costs named above are just the "
+            f"headline items — see every line of the **Financial Results** card below for the full "
+            f"breakdown that adds up to the total.)")
 
 
 def _rev_sweetspot(r):
@@ -2500,7 +2616,7 @@ LAB_FIN = [
         "title": "How many must you sell to cover the fixed costs?",
         "intro": "Costs come in two flavors: **fixed** — the capital tied up in the machines, owed "
                  "whether you make one bottle or a million — and **variable** — materials and production "
-                 "that scale with every unit. Cost out a solid **8-sided line** selling at **$3.00** and "
+                 "that scale with every unit. Cost out a solid line whose six stations each roll **8-faced dice**, selling at **$3.00** and "
                  "find the sales volume where the two exactly cancel: the **break-even point**.",
         "setup": "6 × (1 die × 8 faces) · sell-everything · $3.00/unit · 1 year",
         "apply": {**_line([1] * 6, [8] * 6), "wip_limit_on": False, "supply_reliability": 100,
@@ -2825,7 +2941,7 @@ def _rev_eoq_sweetspot(r):
     if not scan:
         return ("info", "Run this step to build the inventory-cost curve, then come back for the takeaway.")
     tiny = eoq_row_for(scan, 10)
-    return ("good", f"Sweep the order size and total cost traces a **U**. The textbook formula "
+    return ("good", f"Vary the order size across the range and the total cost traces a **U**. The textbook formula "
             f"**EOQ = √(2 · D · S ÷ H)** — with annual raw demand D ≈ **{scan['D']:,.0f}** bottles, ordering "
             f"cost S = **${scan['S']:,.0f}**/order and holding cost H ≈ **${scan['H']:.2f}**/bottle — predicts "
             f"the bottom at ≈ **{scan['eoq']:.0f} bottles**. The simulated cheapest order size is "
@@ -3130,7 +3246,7 @@ LAB_EOQD = [
         "intro": "The best order quantity is set by exactly **three** things: how much you use "
                  "(**demand D**), what it costs to **place an order** (**S**), and what it costs to "
                  "**hold a unit** (**H**). The **EOQ formula** ties them together: **EOQ = √(2·D·S ÷ "
-                 "H)**. We'll start from a balanced 1-die line at the default costs and read off the "
+                 "H)**. We'll start from a balanced six-station, 1-die line at the default costs and read off the "
                  "baseline EOQ — then change one driver at a time.",
         "setup": "6 stations · 1 die × 6 · S = $25/order · H = $0.04/bottle/day · reliable",
         "apply": _eoqd_apply([1] * 6, 25.0, 0.04),
@@ -3224,7 +3340,7 @@ LAB_EOQD = [
         "title": "Reading the best order size off the formula",
         "intro": "One last combination — **pricier orders and cheaper holding**: **S = $50** and "
                  "**H = $0.02/day**. Both changes push the EOQ the **same** way. Predict the direction, "
-                 "then use the reveal to see the whole picture: how demand, ordering cost, and holding "
+                 "then run it to see the whole picture: how demand, ordering cost, and holding "
                  "cost combine into a single best order quantity.",
         "setup": "6 stations · 1 die × 6 · S = $50/order · H = $0.02/bottle/day · reliable",
         "apply": _eoqd_apply([1] * 6, 50.0, 0.02),
@@ -3457,7 +3573,7 @@ LAB_PULL = [
         "title": "Cap WIP — and lose nothing",
         "intro": "Same line, but now cap WIP at **8** on every station. A station can only run when "
                  "there's space downstream — the definition of a **pull** system. The big question for "
-                 "any manager: does throttling WIP throttle output?",
+                 "any manager: does capping WIP cut the line's output?",
         "setup": "Same line · WIP capped at 8 per station (a pull system)",
         "apply": _pull_apply(8),
         "q": "Compared with the push line, capping WIP everywhere will make throughput:",
@@ -3483,7 +3599,7 @@ LAB_PULL = [
     {
         "icon": "🎯", "phase": "Synthesis",
         "title": "Why capping WIP is nearly free",
-        "intro": "Back to the lean pull setting. Predict the principle, then use the reveal to connect "
+        "intro": "Back to the lean pull setting. Predict the principle, then run it to connect "
                  "push-vs-pull to Little's Law and to the bottleneck that's been setting the pace all "
                  "along.",
         "setup": "Same line · WIP capped at 8 (the lean pull setting)",
@@ -3616,9 +3732,9 @@ LAB_TA = [
         "icon": "⛰️", "phase": "Grow Throughput",
         "title": "Add capacity where it counts",
         "intro": "The other kind of 'add a die.' This time raise capacity **across the line so real "
-                 "throughput goes up** (every station to 2 dice). It's the same shopping list as the "
-                 "local-efficiency step — more dice — but pointed at lifting output instead of keeping a "
-                 "feeder busy.",
+                 "throughput goes up** (every station to 2 dice). It's the same change as the "
+                 "local-efficiency step — more dice — but this time aimed at lifting output instead of "
+                 "keeping a feeder busy.",
         "setup": "All 6 stations · 2 dice × 6 (throughput doubles) · no WIP cap",
         "apply": _ta_apply([2] * 6, [6] * 6),
         "q": "Adding capacity so that real throughput T rises will make profit:",
@@ -3630,7 +3746,7 @@ LAB_TA = [
     {
         "icon": "🎯", "phase": "Synthesis",
         "title": "The scoreboard that matters",
-        "intro": "Back to the baseline. Predict the principle, then use the reveal to lock in how T, I "
+        "intro": "Back to the baseline. Predict the principle, then run it to lock in how T, I "
                  "and OE decide profit and ROI — and why 'keep everyone busy' is the wrong goal.",
         "setup": "6 stations · 1 die × 6 · 40 starting units (the baseline, revisited)",
         "apply": _ta_apply([1] * 6, [6] * 6),
@@ -3924,7 +4040,7 @@ LAB_QUAL = [
     {
         "icon": "🧭", "phase": "Synthesis",
         "title": "Quality is capacity",
-        "intro": "Back to the fast-but-scrapping line. Predict the principle, then use the reveal to lock "
+        "intro": "Back to the fast-but-scrapping line. Predict the principle, then run it to lock "
                  "in why yield belongs in every capacity calculation.",
         "setup": "Station 3 = 2 dice, scrapping 60% (the hidden constraint)",
         "apply": _qual_apply([1, 1, 2, 1, 1, 1], {2: 60}),
@@ -4704,10 +4820,23 @@ def _md_escape(s):
     return s.replace("$", "\\$") if isinstance(s, str) else s
 
 
+def _lab_html(s):
+    """Lab text (intro/setup/title/prompts) is rendered inside styled HTML <div>s, where
+    Streamlit does NOT process markdown — so **bold** showed literal asterisks and \\$ showed a
+    literal backslash. This escapes HTML, turns **bold** into <b>, and leaves $ as a plain
+    dollar sign (no LaTeX risk inside raw HTML)."""
+    if not isinstance(s, str):
+        return s
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+    s = re.sub(r"(?<![\w\\])\*(?!\s)(.+?)(?<!\s)\*(?![\w])", r"<i>\1</i>", s)
+    return s
+
+
 def _render_reflect(prefix, i, prompt):
     """Free-text self-explanation after a key reveal. The act of generating the sentence is
     what does the learning; it's recorded (as done/not-done) in the completion code."""
-    st.markdown('<div class="reflect-q">✍️ <b>Explain it:</b> ' + _md_escape(prompt) + "</div>",
+    st.markdown('<div class="reflect-q">✍️ <b>Explain it:</b> ' + _lab_html(prompt) + "</div>",
                 unsafe_allow_html=True)
     txt = st.text_area("Your explanation", key=f"{prefix}_reflect_{i}",
                        label_visibility="collapsed",
@@ -4800,9 +4929,9 @@ def render_lab(results, prefix):
 
         st.markdown(f'<div class="lab-phase">{step["icon"]} {step["phase"]}</div>',
                     unsafe_allow_html=True)
-        st.markdown(f'<div class="lab-h">{_md_escape(step["title"])}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="lab-intro">{_md_escape(step["intro"])}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="lab-setup"><b>The setup:</b> {_md_escape(step["setup"])}</div>',
+        st.markdown(f'<div class="lab-h">{_lab_html(step["title"])}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="lab-intro">{_lab_html(step["intro"])}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="lab-setup"><b>The setup:</b> {_lab_html(step["setup"])}</div>',
                     unsafe_allow_html=True)
         # Anchor + button: the button jumps the sidebar to the setup controls; the anchor is
         # where the view lands after a run, so the fresh result sits just below it.
@@ -4881,7 +5010,7 @@ def render_lab(results, prefix):
                                         unsafe_allow_html=True)
                         else:
                             why = LAB_DISTRACTORS.get(prefix, {}).get(i, {}).get(chosen)
-                            why_html = (f'<div class="lab-fb-why">{_md_escape(why)}</div>') if why else ""
+                            why_html = (f'<div class="lab-fb-why">{_lab_html(why)}</div>') if why else ""
                             st.markdown(f'<div class="lab-fb lab-fb-no">You picked “{pred}”. {why_html}'
                                         f'<div class="lab-fb-then">Here is what actually happened:</div>'
                                         f'</div>', unsafe_allow_html=True)
@@ -4934,19 +5063,21 @@ def render_lab(results, prefix):
             # Final step. Once it's resolved, mark_step_done (above) has recorded it, so the
             # whole lab now counts as complete — confirm that and steer to what's next.
             if lab_is_complete(prefix):
-                if all_labs_complete():
-                    n_labs = len([p for p in LAB_ORDER if p in LABS])
-                    st.success("🏆 **Every lab complete — outstanding work!** "
+                _part = _part_of_lab(prefix)
+                if part_complete(_part):
+                    st.success("🏆 **" + _part + " complete — outstanding work!** "
                                + _md_escape(lab["closer"]))
-                    st.info(f"You've finished all {n_labs} labs. Open **✅ Your progress** in the "
-                            "sidebar and expand **🎓 Get my completion code** to generate the "
-                            "completion score you can submit.")
+                    st.info("You've finished every lab in this part. Open **✅ Your progress** in the "
+                            "sidebar and expand **📄 Get my report to submit** to download the report "
+                            "to upload to this part's LMS assignment."
+                            + ("  When you're ready, switch to **Part 2** at the top of the sidebar."
+                               if _part == LAB_PART_ORDER[0] else ""))
                 else:
                     st.success("🎉 **Lab complete!** " + _md_escape(lab["closer"]))
                     nxt = next_incomplete_lab(prefix)
                     if nxt:
-                        st.caption("You can now pick another lab from **🧭 Choose a lab** in the "
-                                   "sidebar — or jump straight to the next one:")
+                        st.caption("Pick another lab from **🧭 Choose a lab** in the sidebar — or jump "
+                                   "straight to the next one in this part:")
                         st.button("▸  Next lab: " + LAB_SHORT.get(nxt, nxt),
                                   use_container_width=True, on_click=lab_go_to_lab,
                                   args=(nxt,), key=f"{prefix}_nextlab_{i}")
@@ -5209,9 +5340,12 @@ st.markdown(
         /* ---------- Make editable fields obviously input-like ---------- */
         div[data-testid="stNumberInput"] div[data-baseweb="input"],
         div[data-testid="stTextInput"] div[data-baseweb="input"],
-        div[data-testid="stTextInput"] div[data-baseweb="base-input"] {
+        div[data-testid="stTextInput"] div[data-baseweb="base-input"],
+        div[data-testid="stTextArea"] textarea {
             border-width: 1.6px; border-color: #adbbde; background: #f7f9ff;
         }
+        div[data-testid="stTextArea"] textarea:focus {
+            border-color: #ea580c; box-shadow: 0 0 0 3px rgba(234,88,12,0.16); background:#fff; }
         div[data-testid="stNumberInput"] div[data-baseweb="input"]:hover,
         div[data-testid="stTextInput"] div[data-baseweb="input"]:hover { border-color: #ea580c; }
         div[data-testid="stTextInput"] input { font-weight: 600; color: #1f2a44; }
@@ -5551,21 +5685,39 @@ with st.sidebar:
     # ---- Lab chooser (Guided Lab only) ----
     if is_lab:
         with st.container(border=True, key="labpick_card"):
-            st.markdown('<div class="card-title">🧭 Choose a lab</div>', unsafe_allow_html=True)
-            st.radio("Which guided lab?", [LAB_CHOICE_LABEL[p] for p in LAB_ORDER],
+            # Keep the part selector in sync with the current lab, then let it filter the picker.
+            _cur_part = _part_of_lab(lab_prefix_from_choice(st.session_state.get("lab_choice", "")))
+            st.session_state["lab_part"] = _cur_part
+            st.markdown('<div class="card-title">📚 Lab part</div>', unsafe_allow_html=True)
+            st.radio("Which part?", LAB_PART_ORDER, key="lab_part",
+                     label_visibility="collapsed", on_change=lab_on_part_change)
+            st.caption("**Part 1** is the default. **Part 2** is a separate assignment — select it when "
+                       "you're ready. Each part is submitted as its own report (below).")
+            st.markdown('<div class="card-title" style="margin-top:8px">🧭 Choose a lab</div>',
+                        unsafe_allow_html=True)
+            _part_options = [LAB_CHOICE_LABEL[p] for p in _part_labs(_cur_part)]
+            if st.session_state.get("lab_choice") not in _part_options:
+                st.session_state["lab_choice"] = _part_options[0]
+            st.radio("Which guided lab?", _part_options,
                      key="lab_choice", label_visibility="collapsed",
                      on_change=lab_on_choice_change)
             st.caption("Each step **sets the line up for you** the moment you open it — just press "
                        "**Set up & run this step** to see it go, or tweak the controls below and re-run "
                        "to experiment with your own \"what if\".")
 
-        # ---- Progress tracker + completion code ----
+        # ---- Progress tracker (this part) + report download ----
         with st.container(border=True, key="prog_card"):
-            st.markdown('<div class="card-title">✅ Your progress</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="card-title">✅ Your progress — {_cur_part}</div>',
+                        unsafe_allow_html=True)
             _icons = {"ops": "🧭", "little": "⏱️", "pull": "🔄", "var": "🎰",
                       "qual": "✅", "fin": "💰", "ta": "📊", "eoqd": "🧮", "eoq": "📦",
                       "ss": "🚚", "diag": "🔬"}
-            rows, tdone, ttotal, pct = progress_summary()
+            _all_rows, _, _, _ = progress_summary()
+            _row_map = {pre: (lbl, done, n) for pre, lbl, done, n in _all_rows}
+            rows = [(pre, *_row_map[pre]) for pre in _part_labs(_cur_part) if pre in _row_map]
+            tdone = sum(d for _p, _l, d, _n in rows)
+            ttotal = sum(n for _p, _l, _d, n in rows)
+            pct = round(100 * tdone / ttotal) if ttotal else 0
             row_html = []
             for pre, lbl, done, n in rows:
                 complete = (n > 0 and done >= n)
@@ -5577,49 +5729,35 @@ with st.sidebar:
                     f'<span class="prog-count">{done}/{n}{tick}</span></div>')
             labs_done = sum(1 for _p, _l, d, n in rows if n > 0 and d >= n)
             st.markdown(
-                f'<div class="prog-top"><span>Overall</span>'
-                f'<b>{pct}%</b></div>'
+                f'<div class="prog-top"><span>This part</span><b>{pct}%</b></div>'
                 f'<div class="prog-bar"><div class="prog-fill" style="width:{pct}%"></div></div>'
                 f'<div class="prog-sub">{tdone} of {ttotal} steps · {labs_done} of {len(rows)} labs complete</div>'
                 f'<div class="prog-rows">{"".join(row_html)}</div>',
                 unsafe_allow_html=True)
 
-            with st.expander("🎓 Get my completion code"):
-                st.caption("Enter your name and generate a code that records which labs you've "
-                           "finished. Copy it into the assignment on the LMS.")
-                st.text_input("Your name", key="student_name",
-                              placeholder="e.g., Jordan Lee")
-                if st.button("Generate completion code", use_container_width=True,
-                             key="gen_code"):
-                    name = st.session_state.get("student_name", "").strip()
-                    if not name:
-                        st.session_state["completion_code"] = None
-                        st.session_state["_code_warn"] = True
-                    else:
-                        payload, code = make_completion_code(name)
-                        st.session_state["completion_code"] = code
-                        st.session_state["_code_payload"] = payload
-                        st.session_state["_code_warn"] = False
-                        # Also record this completion to shared storage for the roster
-                        # (no-op when storage is off or no student is identified).
-                        store.record_completion(_STORE_GAME, _STORE_SID,
-                                                completion_code=code,
-                                                score=payload.get("pct"))
-                if st.session_state.get("_code_warn"):
-                    st.warning("Type your name first, then generate the code.")
-                if st.session_state.get("completion_code"):
-                    p = st.session_state.get("_code_payload", {})
-                    _rf = p.get("refl", [0, 0])
-                    st.markdown(
-                        f'<div class="prog-receipt"><b>{p.get("n","")}</b> — '
-                        f'{p.get("done",0)} of {p.get("total",0)} steps '
-                        f'({p.get("pct",0)}%) · {_rf[0]} of {_rf[1]} written explanations · '
-                        f'{p.get("ts","")}</div>',
-                        unsafe_allow_html=True)
-                    st.code(st.session_state["completion_code"], language=None)
-                    st.caption("This code encodes your name, per-lab completion, how many "
-                               "self-explanations you wrote, and a timestamp, with a checksum so it "
-                               "can't be edited without detection.")
+            with st.expander("📄 Get my report to submit"):
+                st.caption(f"Enter your name and download your **{_cur_part}** report — then upload "
+                           "the file to this part's assignment on the LMS. (Part 1 and Part 2 are two "
+                           "separate assignments; switch parts above to get the other report.)")
+                st.text_input("Your name", key="student_name", placeholder="e.g., Jordan Lee")
+                _name = st.session_state.get("student_name", "").strip()
+                if not _name:
+                    st.info("Type your name above to enable the download.")
+                else:
+                    _report = build_part_report_html(_cur_part, _name)
+                    _pnum = "1" if _cur_part == LAB_PART_ORDER[0] else "2"
+                    _slug = re.sub(r"[^A-Za-z0-9]+", "_", _name).strip("_")[:30] or "student"
+                    st.download_button(
+                        "⬇️ Download my report (.html)", data=_report.encode("utf-8"),
+                        file_name=f"CapacityCrush_Part{_pnum}_{_slug}.html",
+                        mime="text/html", use_container_width=True, key="dl_report")
+                    st.caption("Open the file to review it; your browser's **Print → Save as PDF** makes "
+                               "a PDF if your LMS requires one.")
+                    # Record this part's completion to the shared roster (no-op when storage is off).
+                    _rd = _report_data(_cur_part)
+                    store.record_completion(
+                        _STORE_GAME, _STORE_SID, completion_code=f"Part {_pnum}: {_name}",
+                        score=(round(100 * _rd["steps_done"] / _rd["steps_total"]) if _rd["steps_total"] else 0))
 
     # ---- Operations: the production line (both modes) ----
     with st.container(border=True, key="ops_card"):
@@ -5678,11 +5816,12 @@ with st.sidebar:
             "🚚 Supplier reliability", min_value=0, max_value=100, step=5,
             key="supply_reliability", format="%d%%",
             help="How often the raw-material supplier delivers on time. At 100% Operation 1 always "
-                 "has bottles to work on and is never starved. Below 100%, deliveries are missed at "
-                 "random, the raw-material buffer can run dry, and Operation 1 sits idle. How hard "
-                 "this hurts depends on the order size: a just-in-time line (order size 1) has no "
-                 "buffer and starves easily, while large batch orders carry cycle stock that cushions "
-                 "missed deliveries.")
+                 "has bottles to work on and is never starved. Below 100%, each scheduled delivery is "
+                 "missed at random with that probability; the line simply re-orders and the next "
+                 "attempt may arrive, so material isn't lost — it's delayed. While it's late, the "
+                 "raw-material buffer drains and Operation 1 sits idle once it runs dry. How hard this "
+                 "hurts depends on the order size: a just-in-time line (order size 1) has no buffer and "
+                 "starves easily, while large batch orders carry cycle stock that cushions the delay.")
         if int(st.session_state["supply_reliability"]) >= 100:
             st.caption("Supplier is fully reliable — Operation 1 is never starved (just-in-time).")
         else:
@@ -5813,40 +5952,6 @@ with st.sidebar:
                 f"Now: ${float(st.session_state['fin_revenue_per_unit']):.2f}/bottle revenue · "
                 f"{float(st.session_state['fin_alloc_pct']):g}% allocation · "
                 f"${float(st.session_state['fin_wip_holding']):.2f}/bottle/day WIP")
-
-        # ---- Instructor tool: decode a student's completion code ----
-        with st.container(border=True, key="decode_card"):
-            st.markdown('<div class="card-title">🔓 Decode a completion code</div>',
-                        unsafe_allow_html=True)
-            st.markdown('<div class="card-sub">Paste a student\'s code to verify it and read '
-                        'their per-lab progress.</div>', unsafe_allow_html=True)
-            st.text_input("Completion code", key="decode_input",
-                          placeholder="JLAB1-…")
-            if st.button("Decode", use_container_width=True, key="decode_btn"):
-                payload, valid = decode_completion_code(st.session_state.get("decode_input", ""))
-                st.session_state["_decoded"] = (payload, valid)
-            if "_decoded" in st.session_state:
-                payload, valid = st.session_state["_decoded"]
-                if not payload:
-                    st.error("That doesn't look like a valid completion code.")
-                else:
-                    if valid:
-                        st.success(f"✓ Valid code — checksum matches.")
-                    else:
-                        st.warning("⚠ Checksum does not match — this code may have been edited.")
-                    lines = [f"**{payload.get('n','(no name)')}** — "
-                             f"{payload.get('done',0)}/{payload.get('total',0)} steps "
-                             f"({payload.get('pct',0)}%)",
-                             f"Submitted: {payload.get('ts','—')}", ""]
-                    _rf = payload.get("refl")
-                    if _rf:
-                        lines.insert(1, f"Self-explanations written: {_rf[0]}/{_rf[1]}")
-                    for pre in LAB_ORDER:
-                        dn = payload.get("labs", {}).get(pre)
-                        if dn:
-                            mark = "✓" if dn[0] >= dn[1] else " "
-                            lines.append(f"{mark} {LAB_SHORT.get(pre, pre)}: {dn[0]}/{dn[1]}")
-                    st.markdown("\n\n".join(lines))
 
     # ---- Run / actions (both modes; replications are Sandbox only) ----
     with st.container(border=True, key="actions_card"):
@@ -6177,7 +6282,11 @@ else:
                         'whole run. Inventory piles up in front of the constraint.</div>',
                         unsafe_allow_html=True)
             st.html(render_op_panel(
-                results["op_detail"], results["bottleneck_label"],
+                results["op_detail"],
+                # When a station scraps, the real constraint is the yield-adjusted one (its good
+                # output is what limits the line). Label that so the picture matches the text.
+                (results.get("eff_bottleneck_label") if results.get("config", {}).get("scrap_on")
+                 else results["bottleneck_label"]),
                 raw_inv=(results.get("end_raw", results.get("raw_series", [0])[-1] if results.get("raw_series") else 0)
                          if results.get("show_raw", True) else None),
                 fgi=(results.get("end_fgi", 0) if results.get("show_fgi", results.get("demand_on")) else None),
