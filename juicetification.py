@@ -97,8 +97,8 @@ CAP_MIN, CAP_MAX = 0, 20
 # sidebar, but an instructor expecting many simultaneous users can turn it OFF for everyone
 # by setting the environment variable JCC_ANIMATIONS=off (the playback is the main per-run
 # server cost: it holds the session for a couple of seconds and streams ~240 frames).
-ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "on").strip().lower() not in (
-    "0", "off", "false", "no", "disable", "disabled")
+ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "off").strip().lower() in (
+    "1", "on", "true", "yes", "enable", "enabled")
 SIDES_MIN, SIDES_MAX = 0, 100
 
 # ---- Per-station WIP (work-in-process) limit ----
@@ -252,11 +252,11 @@ def _load_run_seed():
 # module-level constant so the code, the tracker card, and the decoder all agree on the
 # set of labs and their short keys. (LABS itself is defined much later, so the tracker
 # reads step counts from it lazily at call time.)
-LAB_ORDER = ["ops", "little", "pull", "var", "qual", "fin", "ta", "eoqd", "eoq", "ss", "diag"]
+LAB_ORDER = ["ops", "little", "pull", "var", "qual", "fin", "ta", "eoqd", "eoq", "ss", "diag", "diag2"]
 LAB_SHORT = {"ops": "Operations", "little": "Little's Law", "pull": "Pull vs. Push",
              "var": "Variability", "qual": "Quality & Yield", "fin": "Economics",
              "ta": "Throughput Acct.", "eoqd": "EOQ Drivers", "eoq": "EOQ limits",
-             "ss": "Safety Stock", "diag": "Capstone"}
+             "ss": "Safety Stock", "diag": "Capstone", "diag2": "Capstone II"}
 # Full labels shown in the sidebar "Choose a lab" picker — one source of truth, in LAB_ORDER
 # order, so the picker and the "next lab" jump can never drift apart.
 LAB_CHOICE_LABEL = {
@@ -271,6 +271,7 @@ LAB_CHOICE_LABEL = {
     "eoq": "Inventory · The EOQ model & its limits",
     "ss": "Safety Stock · Reorder point & service level",
     "diag": "Capstone · Diagnose & Fix (no labels)",
+    "diag2": "Capstone · Diagnose & Fix (the money side)",
 }
 
 # The 11 labs are split into two assignments. Part 1 (default) covers the physical line —
@@ -279,7 +280,7 @@ LAB_CHOICE_LABEL = {
 LAB_PART_ORDER = ["Part 1 — Constraints & Flow", "Part 2 — Economics & Inventory"]
 LAB_PARTS = {
     "Part 1 — Constraints & Flow": ["ops", "little", "pull", "var", "qual", "diag"],
-    "Part 2 — Economics & Inventory": ["fin", "ta", "eoqd", "eoq", "ss"],
+    "Part 2 — Economics & Inventory": ["fin", "ta", "eoqd", "eoq", "ss", "diag2"],
 }
 
 def _part_labs(part):
@@ -682,6 +683,7 @@ def initialize_state():
     st.session_state.setdefault("ss_step", 0)
     st.session_state.setdefault("qual_step", 0)
     st.session_state.setdefault("diag_step", 0)
+    st.session_state.setdefault("diag2_step", 0)
     st.session_state.setdefault("lab_part", LAB_PART_ORDER[0])
     st.session_state.setdefault("run_counter", 0)
     # Navigation tokens for the scroll-to-top-on-nav behavior (equal on first load → no scroll
@@ -4267,6 +4269,179 @@ LAB_DIAG = [
 ]
 
 
+
+
+# =========================================================
+# PART 2 CAPSTONE — "Diagnose & Fix: the money side". Three broken lines whose numbers look
+# fine until you read the money: one is unprofitable, one is ordering stock all wrong, one is
+# starving for lack of a buffer. Same three options every time → the student must discriminate.
+# =========================================================
+_DIAG2_OPTS = [
+    "The line is losing money — the price doesn't cover its costs",
+    "The order size is wrong — inventory cost is far above the minimum",
+    "Stockouts — an unreliable supplier with too thin a buffer",
+]
+
+
+def _pl(r):
+    cfg = r.get("config", {})
+    dice = cfg.get("dice", [0] * N_OPS)
+    sides = cfg.get("faces", [0] * N_OPS)
+    return compute_financials(r, dice, sides, int(cfg.get("years", 1) or 1), get_fin())
+
+
+def _rev_diag2_money(r):
+    f = _pl(r)
+    return ("warn", f"**Losing money.** The line runs fine, but the **profit is "
+            f"${f['profit']:,.0f}** — a loss. Revenue of **${f['revenue']:,.0f}** doesn't cover "
+            f"**${f['total_cost']:,.0f}** of cost: every bottle sells for less than it costs to make. "
+            f"Service is 100% and the order size is sensible, so it isn't the supplier or the EOQ — "
+            f"it's the **price**. Fix it by charging enough to clear the cost per bottle.")
+
+
+def _rev_diag2_order(r):
+    cfg = r.get("config", {})
+    osz = int(cfg.get("order_size", 0))
+    eoq = r.get("eoq_scan", {}).get("eoq")
+    eoqtxt = f"**≈ {eoq:,.0f}**" if eoq else "much smaller"
+    return ("warn", f"**Order size is wrong.** The line is profitable and fully served, but the "
+            f"inventory bill is far above where it should be: you're ordering **{osz:,} bottles at a "
+            f"time**, while the economic order quantity is {eoqtxt}. Too large an order piles up "
+            f"holding cost; too small runs up ordering cost. The cost-vs-order-size curve below is a "
+            f"**U** — slide the order size to the bottom of it.")
+
+
+def _rev_diag2_stockout(r):
+    svc = r["service_level"] * 100
+    return ("warn", f"**Stockouts.** The tell is the **service level: {svc:.0f}%** — the line is "
+            f"starved about **{100 - svc:.0f}%** of the time, so sales walk out the door. Profit and the "
+            f"EOQ aren't the problem; an unreliable supplier plus a thin raw-material buffer is. Raise "
+            f"the **reorder point** so a missed delivery doesn't empty the line.")
+
+
+_DIAG2_INTRO = ("This is the Part 2 capstone. Each line below **looks like it's running** — bottles "
+                "come out — but the *money* tells a different story. Read the **profit, the inventory "
+                "cost curve, and the service level**, then name the problem from the three options and "
+                "fix it. Nobody labels which lever is broken.")
+
+LAB_DIAG2 = [
+    # ---- Case 1: losing money (answer 0) ----
+    {
+        "icon": "🔬", "phase": "Case 1 — Diagnose",
+        "title": "Line P sells plenty but bleeds cash",
+        "intro": _DIAG2_INTRO + "\n\n**Line P:** output is healthy, yet the owner is going broke.",
+        "setup": "Run it, read the Financial Results, then pick the cause.",
+        "apply": {**_line([1] * 6, [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
+                  "demand_variable": False, "starting_inventory": 0, "simulation_years": 1,
+                  "scrap_on": False, "reorder_point_on": False, "fin_order_size": 150,
+                  "fin_revenue_per_unit": 0.50},
+        "diagnose": True,
+        "q": "What's wrong with Line P?",
+        "opts": _DIAG2_OPTS, "answer": 0,
+        "reflect": "In one sentence: which two numbers in the P&L told you the price was the problem?",
+        "check": lambda r: abs(float(r.get("config", {}).get("revenue_per_unit", 3.0)) - 0.50) < 0.01,
+        "reveal": _rev_diag2_money,
+    },
+    {
+        "icon": "🔧", "phase": "Case 1 — Fix",
+        "title": "Fix Line P",
+        "intro": "**Your task:** get the line **back into profit (net profit above $0).** Open the "
+                 "💰 Economics card and raise the price until each bottle more than pays for itself.",
+        "setup": "Start: the same line, selling at just $0.50 a bottle.",
+        "apply": {**_line([1] * 6, [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
+                  "demand_variable": False, "starting_inventory": 0, "simulation_years": 1,
+                  "scrap_on": False, "reorder_point_on": False, "fin_order_size": 150,
+                  "fin_revenue_per_unit": 0.50},
+        "challenge": {
+            "tries": 3, "focus": "fin_card",
+            "hint": "Open the 💰 Economics card and raise the selling price. Watch the P&L flip from red "
+                    "to black once the price clears the cost per bottle.",
+            "targets": [
+                {"label": "Net profit", "get": lambda r: _pl(r)["profit"], "fmt": "${:,.0f}",
+                 "goal": "> $0", "ok": lambda r: _pl(r)["profit"] > 0},
+            ],
+        },
+        "check": lambda r: True,
+    },
+    # ---- Case 2: stockouts (answer 2) ----
+    {
+        "icon": "🔬", "phase": "Case 2 — Diagnose",
+        "title": "Line Q keeps running dry",
+        "intro": "**Line Q:** priced right and ordering sensibly, but output and sales keep coming up "
+                 "short. Run it and find the cause.",
+        "setup": "Run it, read the service level, then pick the cause.",
+        "apply": _ss_apply(5, rel=50, osz=10),
+        "diagnose": True,
+        "q": "What's wrong with Line Q?",
+        "opts": _DIAG2_OPTS, "answer": 2,
+        "reflect": "In one sentence: which single metric revealed that the problem was the supplier, "
+                   "not the price or the order size?",
+        "check": lambda r: r["config"].get("reorder_on") and r["config"].get("supply_reliability", 100) <= 60,
+        "reveal": _rev_diag2_stockout,
+    },
+    {
+        "icon": "🔧", "phase": "Case 2 — Fix",
+        "title": "Fix Line Q",
+        "intro": "**Your task:** get the **service level to 95% or better.** The supplier only delivers "
+                 "half the time — build a buffer so a miss doesn't starve the line.",
+        "setup": "Start: a 50%-reliable supplier and a reorder point of just 5.",
+        "apply": _ss_apply(5, rel=50, osz=10),
+        "challenge": {
+            "tries": 3, "focus": "safety_card",
+            "hint": "Raise the reorder point (🚚 card) so a cushion of raw material is always on hand "
+                    "when a delivery is missed.",
+            "targets": [
+                {"label": "Service level", "get": lambda r: r["service_level"] * 100, "fmt": "{:,.0f}%",
+                 "goal": "≥ 95%", "ok": lambda r: round(r["service_level"] * 100) >= 95},
+            ],
+        },
+        "check": lambda r: True,
+    },
+    # ---- Case 3: order size wrong (answer 1) ----
+    {
+        "icon": "🔬", "phase": "Case 3 — Diagnose",
+        "title": "Line R's inventory bill is enormous",
+        "intro": "**Line R:** profitable and never starved, but the inventory cost is through the roof. "
+                 "Run it, read the order-size cost curve, and find the cause.",
+        "setup": "Run it, read the EOQ cost curve, then pick the cause.",
+        "apply": {**_line([1] * 6, [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
+                  "demand_variable": False, "starting_inventory": 0, "simulation_years": 1,
+                  "scrap_on": False, "reorder_point_on": False, "fin_order_size": 2000,
+                  "fin_revenue_per_unit": 3.00},
+        "diagnose": True,
+        "q": "What's wrong with Line R?",
+        "opts": _DIAG2_OPTS, "answer": 1,
+        "reflect": "In one sentence: how did the cost-vs-order-size curve show the order size was far "
+                   "from its sweet spot?",
+        "check": lambda r: int(r["config"].get("order_size", 0)) >= 1000,
+        "reveal": _rev_diag2_order,
+    },
+    {
+        "icon": "🔧", "phase": "Case 3 — Fix",
+        "title": "Fix Line R",
+        "intro": "**Your task:** bring the **order size down to its economic sweet spot** — within about "
+                 "100 bottles of the EOQ the curve points to.",
+        "setup": "Start: ordering a wasteful 2,000 bottles at a time.",
+        "apply": {**_line([1] * 6, [6] * 6), "wip_limit_on": False, "supply_reliability": 100,
+                  "demand_variable": False, "starting_inventory": 0, "simulation_years": 1,
+                  "scrap_on": False, "reorder_point_on": False, "fin_order_size": 2000,
+                  "fin_revenue_per_unit": 3.00},
+        "challenge": {
+            "tries": 3, "focus": "eoqcost_card",
+            "hint": "Lower the raw-material order size toward the bottom of the U-shaped cost curve — "
+                    "the EOQ for this line is roughly 180.",
+            "targets": [
+                {"label": "Order size vs EOQ", "get": lambda r: int(r["config"].get("order_size", 0)),
+                 "fmt": "{:,} bottles", "goal": "within ~100 of EOQ",
+                 "ok": lambda r: abs(int(r["config"].get("order_size", 0))
+                                     - (r.get("eoq_scan", {}).get("eoq") or 184)) <= 100},
+            ],
+        },
+        "check": lambda r: True,
+    },
+]
+
+
 LABS = {
     "ops": {"title": "🧭 Operations Lab — the Five Focusing Steps", "steps": LAB_OPS,
             "closer": "That's the full cycle — Identify ▸ Exploit ▸ Subordinate ▸ Elevate ▸ Repeat."},
@@ -4309,6 +4484,10 @@ LABS = {
                        "constraint — bottleneck, yield, supply, or WIP — and reach for the matching "
                        "lever. Nobody labels the problem for you on a real line; now you can label it "
                        "yourself."},
+    "diag2": {"title": "🔬 Part 2 Capstone — Diagnose & Fix: the money side", "steps": LAB_DIAG2,
+              "closer": "Same discipline, now on the money: a line can run perfectly and still lose "
+                        "cash, over-order, or starve. Read the profit, the inventory cost curve, and the "
+                        "service level — and fix the one that's actually broken."},
 }
 
 
@@ -4766,6 +4945,17 @@ LAB_DISTRACTORS = {
                "pushing, not quality.",
             2: "Service is 100% — supply is fine. The inventory is piling up *inside* the line, not "
                "waiting on the supplier."},
+    },
+    "diag2": {
+        0: {1: "The order size (150) is sensible and the inventory cost is normal — look at the price "
+               "against the cost per bottle instead.",
+            2: "Service is 100% — the supplier is fine. The loss is in the price, not the buffer."},
+        2: {0: "At full service this line is profitable — the trouble is it *isn't* at full service. "
+               "Read the service level.",
+            1: "The order size isn't the problem here; the line is simply starved. Look at the service "
+               "level."},
+        4: {0: "The line is profitable — more so once the ordering is fixed. It isn't the price.",
+            2: "Service is 100% — the supplier is fine. The waste is in how much you buy per order."},
     },
 }
 
@@ -5226,6 +5416,9 @@ def demand_params():
 # (replications, A/B scenarios) and show the financial P&L only for the Economics lab,
 # so each lab's main panel stays focused on the lesson at hand.
 def lab_prefix_from_choice(choice):
+    choice = choice or ""
+    if "money side" in choice:
+        return "diag2"
     if "Capstone" in choice or "Diagnose" in choice:
         return "diag"
     if "Economics" in choice:
@@ -5251,16 +5444,31 @@ def lab_prefix_from_choice(choice):
 
 IS_LAB = st.session_state["app_mode"] == "Guided Lab"
 LAB_PREFIX = lab_prefix_from_choice(st.session_state.get("lab_choice", ""))
+
+
+def _lab_in(*prefixes):
+    """A sidebar control / result is shown either in the Sandbox (everything) or in the specific
+    labs that actually use it. Keeping each lab to just its relevant inputs and outputs is what
+    makes the simulation followable for a first-time user."""
+    return (not IS_LAB) or (LAB_PREFIX in prefixes)
+
+
 SHOW_SANDBOX_TOOLS = not IS_LAB                       # replications, A/B pins & comparison
-SHOW_FINANCIALS = (not IS_LAB) or (LAB_PREFIX in ("fin", "ta"))
-SHOW_FLOWTIME = (not IS_LAB) or (LAB_PREFIX in ("ops", "var", "little", "pull", "diag"))
-SHOW_SAFETY = (not IS_LAB) or (LAB_PREFIX in ("ss", "diag"))
-SHOW_QUALITY = (not IS_LAB) or (LAB_PREFIX in ("qual", "diag"))
-IS_EOQ_LAB = IS_LAB and LAB_PREFIX in ("eoq", "eoqd")
-# The per-operation panel and the WIP/output charts belong to the labs about the line's
-# physical flow. The money / cost / service labs have their own focused result cards, so
-# hide the flow charts there (and the planned-line metrics strip) to keep the panel clean.
-SHOW_LINE_DETAIL = (not IS_LAB) or (LAB_PREFIX in ("ops", "little", "pull", "var", "qual", "diag"))
+# Inputs (sidebar cards / sub-controls)
+SHOW_WIP      = _lab_in("ops", "little", "pull", "diag")
+SHOW_SUPPLY   = _lab_in("var", "ss", "diag", "diag2")           # supplier reliability
+SHOW_DEMAND   = _lab_in("var", "diag")                          # variable market demand
+SHOW_ORDERSZ  = _lab_in("var", "ss", "eoq", "eoqd", "diag2")    # raw-material order size
+SHOW_EOQ      = _lab_in("eoq", "eoqd", "diag2")                 # order & holding cost + EOQ curve
+SHOW_SAFETY   = _lab_in("ss", "diag", "diag2")                  # reorder point
+SHOW_QUALITY  = _lab_in("qual", "diag")                         # scrap / yield
+SHOW_FINANCIALS = _lab_in("fin", "ta", "diag2")                # economics / P&L
+SHOW_STARTINV = _lab_in("var", "ss", "diag", "diag2")          # starting inventory setting
+SHOW_YEARS    = (not IS_LAB)                                    # labs run a single year
+IS_EOQ_LAB    = IS_LAB and LAB_PREFIX in ("eoq", "eoqd")
+# Outputs
+SHOW_FLOWTIME = _lab_in("ops", "var", "little", "pull", "diag")
+SHOW_LINE_DETAIL = _lab_in("ops", "little", "pull", "var", "qual", "diag")  # per-op panel + WIP charts
 
 
 # =========================================================
@@ -5711,7 +5919,7 @@ with st.sidebar:
                         unsafe_allow_html=True)
             _icons = {"ops": "🧭", "little": "⏱️", "pull": "🔄", "var": "🎰",
                       "qual": "✅", "fin": "💰", "ta": "📊", "eoqd": "🧮", "eoq": "📦",
-                      "ss": "🚚", "diag": "🔬"}
+                      "ss": "🚚", "diag": "🔬", "diag2": "🔬"}
             _all_rows, _, _, _ = progress_summary()
             _row_map = {pre: (lbl, done, n) for pre, lbl, done, n in _all_rows}
             rows = [(pre, *_row_map[pre]) for pre in _part_labs(_cur_part) if pre in _row_map]
@@ -5782,16 +5990,18 @@ with st.sidebar:
     # ---- Run settings (both modes) ----
     with st.container(border=True, key="settings_card"):
         st.markdown('<div class="card-title">📊 Run settings</div>', unsafe_allow_html=True)
-        st.number_input(
-            "Starting inventory in front of every station (bottles)",
-            min_value=0, max_value=99999, step=1, key="starting_inventory",
-            help="How many bottles are already waiting in front of each station when the clock "
-                 "starts. 0 reproduces the textbook empty-line case.")
-        st.number_input(
-            "Years to simulate (1–5)",
-            min_value=1, max_value=MAX_YEARS, step=1, key="simulation_years",
-            help=f"Each year is {DAYS_PER_YEAR} working days × {HOURS_PER_DAY} hours = "
-                 f"{HOURS_PER_YEAR:,} dice rolls per operation.")
+        if SHOW_STARTINV:
+            st.number_input(
+                "Starting inventory in front of every station (bottles)",
+                min_value=0, max_value=99999, step=1, key="starting_inventory",
+                help="How many bottles are already waiting in front of each station when the clock "
+                     "starts. 0 reproduces the textbook empty-line case.")
+        if SHOW_YEARS:
+            st.number_input(
+                "Years to simulate (1–5)",
+                min_value=1, max_value=MAX_YEARS, step=1, key="simulation_years",
+                help=f"Each year is {DAYS_PER_YEAR} working days × {HOURS_PER_DAY} hours = "
+                     f"{HOURS_PER_YEAR:,} dice rolls per operation.")
         st.checkbox(
             "Play the run animation", key="animate",
             help="Plays the line back day by day when you press Run. Uncheck for a faster, lighter "
@@ -5805,68 +6015,73 @@ with st.sidebar:
                 help="How fast the live dashboard plays the days back. Instant skips straight to the "
                      "finished results.")
 
-    # ---- Variability switches (both modes) ----
-    with st.container(border=True, key="var_card"):
-        st.markdown('<div class="card-title">🎰 Variability — real-world uncertainty</div>',
-                    unsafe_allow_html=True)
-        st.markdown('<div class="card-sub">Each station\'s hourly output already varies (the dice). '
-                    'These controls add uncertainty at the two ends of the bottling line — the '
-                    'supplier and the market.</div>', unsafe_allow_html=True)
-        st.slider(
-            "🚚 Supplier reliability", min_value=0, max_value=100, step=5,
-            key="supply_reliability", format="%d%%",
-            help="How often the raw-material supplier delivers on time. At 100% Operation 1 always "
-                 "has bottles to work on and is never starved. Below 100%, each scheduled delivery is "
-                 "missed at random with that probability; the line simply re-orders and the next "
-                 "attempt may arrive, so material isn't lost — it's delayed. While it's late, the "
-                 "raw-material buffer drains and Operation 1 sits idle once it runs dry. How hard this "
-                 "hurts depends on the order size: a just-in-time line (order size 1) has no buffer and "
-                 "starves easily, while large batch orders carry cycle stock that cushions the delay.")
-        if int(st.session_state["supply_reliability"]) >= 100:
-            st.caption("Supplier is fully reliable — Operation 1 is never starved (just-in-time).")
-        else:
-            st.caption(f"≈ {100 - int(st.session_state['supply_reliability'])}% of hours the delivery "
-                       f"is missed; raw material in front of Operation 1 will swing and the line can "
-                       f"starve.")
-        st.number_input(
-            "📦 Raw-material order size (bottles/order)", min_value=1, step=10,
-            key="fin_order_size",
-            help="How many bottles the supplier delivers per purchase order — this sets how much raw "
-                 "material sits in front of Operation 1. Order size 1 is just-in-time (the supplier "
-                 "feeds the line bottle-by-bottle, so almost no raw inventory is held, but it's "
-                 "exposed if the supplier misses a delivery). Larger orders arrive in batches that "
-                 "sit as cycle stock and cushion an unreliable supplier — but tie up inventory.")
-        _osz = int(st.session_state["fin_order_size"])
-        if _osz <= 1:
-            st.caption("Just-in-time: deliveries match consumption, so raw inventory stays near zero "
-                       "— lean, but fully exposed to a shaky supplier.")
-        else:
-            st.caption(f"Batches of {_osz:,} arrive and draw down as the line consumes them, so raw "
-                       f"inventory averages ≈ {max(1, _osz // 2):,} bottles of cycle stock.")
-        st.toggle(
-            "📉 Variable demand (finite, fluctuating market)", key="demand_variable",
-            help="On: each hour the market orders a random number of bottles. Bottles that aren't "
-                 "sold wait in finished-goods inventory (holding cost) and orders you can't fill are "
-                 "lost. Off: every bottle produced is sold.")
-        if st.session_state["demand_variable"]:
-            dcol = st.columns(2)
-            dcol[0].number_input("Demand dice", min_value=1, max_value=9, step=1,
-                                 key="demand_dice")
-            dcol[1].number_input("Demand faces", min_value=2, max_value=12, step=1,
-                                 key="demand_faces")
-            dmean = int(st.session_state["demand_dice"]) * (int(st.session_state["demand_faces"]) + 1) / 2
-            st.caption(f"Average demand ≈ {dmean:.1f} bottles/hr "
-                       f"({dmean * HOURS_PER_YEAR:,.0f}/yr). Match this to the line's capacity, "
-                       f"or deliberately mismatch it to see lost sales and finished-goods pile-ups.")
+    # ---- Variability switches — only the sub-controls this lab actually uses ----
+    _ordersz_here = SHOW_ORDERSZ and not SHOW_EOQ   # EOQ labs show order size in the cost card
+    if SHOW_SUPPLY or SHOW_DEMAND or _ordersz_here:
+        with st.container(border=True, key="var_card"):
+            st.markdown('<div class="card-title">🎰 Supply, demand & order size</div>',
+                        unsafe_allow_html=True)
+            if SHOW_SUPPLY:
+                st.slider(
+                    "🚚 Supplier reliability", min_value=0, max_value=100, step=5,
+                    key="supply_reliability", format="%d%%",
+                    help="How often the raw-material supplier delivers on time. At 100% Operation 1 "
+                         "always has bottles and is never starved. Below 100%, each delivery is missed "
+                         "at random with that probability; the line re-orders and the next attempt may "
+                         "arrive, so material is delayed, not lost. While it's late, the raw buffer "
+                         "drains and Operation 1 idles once it runs dry.")
+                if int(st.session_state["supply_reliability"]) >= 100:
+                    st.caption("Supplier is fully reliable — Operation 1 is never starved (just-in-time).")
+                else:
+                    st.caption(f"≈ {100 - int(st.session_state['supply_reliability'])}% of hours the "
+                               f"delivery is missed; raw material in front of Operation 1 swings and the "
+                               f"line can starve.")
+            if _ordersz_here:
+                st.number_input(
+                    "📦 Raw-material order size (bottles/order)", min_value=1, step=10,
+                    key="fin_order_size",
+                    help="How many bottles the supplier delivers per purchase order — this sets how much "
+                         "raw material sits in front of Operation 1. Order size 1 is just-in-time "
+                         "(almost no raw inventory, but exposed to a missed delivery). Larger orders "
+                         "arrive as batches of cycle stock that cushion an unreliable supplier — but tie "
+                         "up inventory.")
+                _osz = int(st.session_state["fin_order_size"])
+                if _osz <= 1:
+                    st.caption("Just-in-time: deliveries match consumption, so raw inventory stays near "
+                               "zero — lean, but fully exposed to a shaky supplier.")
+                else:
+                    st.caption(f"Batches of {_osz:,} arrive and draw down as the line consumes them, so "
+                               f"raw inventory averages ≈ {max(1, _osz // 2):,} bottles of cycle stock.")
+            if SHOW_DEMAND:
+                st.toggle(
+                    "📉 Variable demand (finite, fluctuating market)", key="demand_variable",
+                    help="On: each hour the market orders a random number of bottles. Unsold bottles "
+                         "wait in finished-goods inventory (holding cost) and orders you can't fill are "
+                         "lost. Off: every bottle produced is sold.")
+                if st.session_state["demand_variable"]:
+                    dcol = st.columns(2)
+                    dcol[0].number_input("Demand dice", min_value=1, max_value=9, step=1,
+                                         key="demand_dice")
+                    dcol[1].number_input("Demand faces", min_value=2, max_value=12, step=1,
+                                         key="demand_faces")
+                    dmean = int(st.session_state["demand_dice"]) * (int(st.session_state["demand_faces"]) + 1) / 2
+                    st.caption(f"Average demand ≈ {dmean:.1f} bottles/hr "
+                               f"({dmean * HOURS_PER_YEAR:,.0f}/yr). Match this to the line's capacity, or "
+                               f"mismatch it to see lost sales and finished-goods pile-ups.")
 
-    # ---- EOQ costs (order cost & holding cost) — shown for the EOQ labs and Sandbox ----
-    if IS_EOQ_LAB or SHOW_SANDBOX_TOOLS:
+    # ---- EOQ: order size + its two cost drivers (EOQ labs, the money capstone, and Sandbox) ----
+    if SHOW_EOQ:
         with st.container(border=True, key="eoqcost_card"):
-            st.markdown('<div class="card-title">💲 Order & holding cost</div>',
-                        unsafe_allow_html=True)
-            st.markdown('<div class="card-sub">The two cost drivers of the EOQ. Change these (and the '
-                        'line above, which sets demand) and re-run to see the best order size move.</div>',
-                        unsafe_allow_html=True)
+            st.markdown('<div class="card-title">📦 Order size & its costs</div>', unsafe_allow_html=True)
+            st.markdown('<div class="card-sub">Set how many bottles you buy per order, then the two '
+                        'costs that pull against each other. Re-run to see the best order size (EOQ) and '
+                        'the total-cost curve move.</div>', unsafe_allow_html=True)
+            st.number_input(
+                "📦 Raw-material order size (bottles/order)", min_value=1, step=10,
+                key="fin_order_size",
+                help="How many bottles you buy per purchase order. Small orders mean many orders "
+                     "(high ordering cost); large orders sit as inventory (high holding cost). The EOQ "
+                     "is the size that balances the two.")
             fin_number_input(
                 st, "Ordering cost — S ($/order)", "fin_order_cost", DEFAULT_ORDER_COST,
                 wprefix="sb", min_value=1.0, step=5.0, format="%.2f",
@@ -5879,29 +6094,30 @@ with st.sidebar:
             st.caption(f"Holding works out to ≈ \\${_hy:,.2f} per bottle per year. "
                        f"EOQ = √(2·D·S ÷ H): bigger with demand and ordering cost, smaller with holding.")
 
-    # ---- WIP limits (both modes) ----
-    with st.container(border=True, key="wip_card"):
-        st.markdown('<div class="card-title">🚧 WIP limits</div>', unsafe_allow_html=True)
-        st.markdown('<div class="card-sub">Cap the inventory allowed to wait in front of each '
-                    'station — a pull / Kanban control. A tight cap slashes work-in-process '
-                    '(and its holding cost) but can throttle throughput; leave it off for an '
-                    'uncapped push line.</div>', unsafe_allow_html=True)
-        st.toggle("Cap work-in-process per station", key="wip_limit_on")
-        if st.session_state["wip_limit_on"]:
-            st.caption("Max bottles allowed in front of each active station. **0 blocks flow "
-                       "entirely**; a large number is effectively unlimited.")
-            caps_tmp = [int(st.session_state[f"capacity_{i}"]) for i in range(N_OPS)]
-            sides_tmp = [int(st.session_state[f"sides_{i}"]) for i in range(N_OPS)]
-            active_tmp = [(c > 0 and s > 0) for c, s in zip(caps_tmp, sides_tmp)]
-            if any(active_tmp):
-                for i in range(N_OPS):
-                    if active_tmp[i]:
-                        st.number_input(
-                            f"Op #{i + 1} — max units of WIP",
-                            min_value=WIP_CAP_MIN, max_value=WIP_CAP_MAX, step=1,
-                            key=f"wip_cap_{i}")
-            else:
-                st.caption("Configure at least one operation above to set its WIP cap.")
+    # ---- WIP limits (flow labs + Sandbox) ----
+    if SHOW_WIP:
+        with st.container(border=True, key="wip_card"):
+            st.markdown('<div class="card-title">🚧 WIP limits</div>', unsafe_allow_html=True)
+            st.markdown('<div class="card-sub">Cap the inventory allowed to wait in front of each '
+                        'station — a pull / Kanban control. A tight cap slashes work-in-process '
+                        '(and its holding cost) but can throttle throughput; leave it off for an '
+                        'uncapped push line.</div>', unsafe_allow_html=True)
+            st.toggle("Cap work-in-process per station", key="wip_limit_on")
+            if st.session_state["wip_limit_on"]:
+                st.caption("Max bottles allowed in front of each active station. **0 blocks flow "
+                           "entirely**; a large number is effectively unlimited.")
+                caps_tmp = [int(st.session_state[f"capacity_{i}"]) for i in range(N_OPS)]
+                sides_tmp = [int(st.session_state[f"sides_{i}"]) for i in range(N_OPS)]
+                active_tmp = [(c > 0 and s > 0) for c, s in zip(caps_tmp, sides_tmp)]
+                if any(active_tmp):
+                    for i in range(N_OPS):
+                        if active_tmp[i]:
+                            st.number_input(
+                                f"Op #{i + 1} — max units of WIP",
+                                min_value=WIP_CAP_MIN, max_value=WIP_CAP_MAX, step=1,
+                                key=f"wip_cap_{i}")
+                else:
+                    st.caption("Configure at least one operation above to set its WIP cap.")
 
     # ---- Reorder point / safety stock (Safety-Stock lab + Sandbox) ----
     if SHOW_SAFETY:
@@ -6089,8 +6305,8 @@ if run_clicked and not errs:
         reorder_point=_rop, scrap=_scrap,
     )
     if full:
-        if IS_EOQ_LAB or not IS_LAB:
-            # EOQ lab and Sandbox both show the inventory cost-vs-order-size curve.
+        if SHOW_EOQ:
+            # EOQ labs, the money capstone, and Sandbox show the inventory cost-vs-order-size curve.
             _eoq_fin = get_fin()
             _eoq_margin = eoq_unit_margin(
                 full, caps, sides, int(st.session_state["simulation_years"]), _eoq_fin)
@@ -6119,6 +6335,7 @@ if run_clicked and not errs:
                          if st.session_state["wip_limit_on"] else None),
             "start_inv": int(st.session_state["starting_inventory"]),
             "order_size": int(st.session_state["fin_order_size"]),
+            "revenue_per_unit": float(st.session_state.get("fin_revenue_per_unit", DEFAULT_REVENUE_PER_UNIT)),
             "order_cost": float(st.session_state.get("fin_order_cost", DEFAULT_ORDER_COST)),
             "raw_holding": float(st.session_state.get("fin_raw_holding", DEFAULT_RAW_HOLDING)),
             "reorder_on": bool(st.session_state.get("reorder_point_on")),

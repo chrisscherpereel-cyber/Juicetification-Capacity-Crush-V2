@@ -41,7 +41,9 @@ and then has to engineer** — which is where the idea actually lands.
   8. EOQ Drivers
   9. EOQ Limits
   10. Safety Stock
-  11. **Capstone — Diagnose & Fix** (an interleaved, unlabeled diagnostic challenge)
+  11. **Part 1 Capstone — Diagnose & Fix** (an interleaved, unlabeled flow diagnosis)
+  - Part 2 adds a parallel **Part 2 Capstone — Diagnose & Fix: the money side** (losing money,
+    wrong order size, or stockouts)
 - **Predict → Run → Reveal** on every step (commit to a prediction before you see the answer).
 - **Distractor-specific feedback** — each wrong answer gets a one-line explanation aimed at the exact
   misconception behind it.
@@ -49,6 +51,8 @@ and then has to engineer** — which is where the idea actually lands.
 - **Open design challenges** with an automated pass/fail check and limited tries.
 - **Self-explanation prompts** after the key reveals; the count is folded into a tamper-evident
   completion code.
+- **Each lab shows only its relevant controls and results** — the sidebar and dashboard are
+  filtered per lab so a first-time user isn't faced with unused inputs or off-topic feedback.
 - **Per-part progress & submission reports** — the 11 labs form two parts (Part 1 default, Part 2
   selectable); each part produces a downloadable HTML report of the student's work to upload to the LMS.
 
