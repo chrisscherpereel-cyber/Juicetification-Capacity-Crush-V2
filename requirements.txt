@@ -6,3 +6,4 @@ pandas>=2.0
 # still runs and these are simply unused.
 dropbox>=11.0
 cryptography>=42.0
+fpdf2>=2.7

@@ -87,9 +87,8 @@ Streamlit will open the simulation in your browser (usually at http://localhost:
   and **Part 2 — Economics & Inventory**, chosen at the top of the sidebar. Each part is submitted
   separately.
 - **To collect work**, have each student open **Your progress → Get my report to submit**, enter their
-  name, and **download the HTML report** for that part — then upload it to the matching LMS assignment
-  (it lists completed labs, design-challenge outcomes, and their self-explanations; it prints to PDF
-  from the browser if the LMS requires PDF). There is no completion code to copy.
+  name, and **download the PDF report** for that part — then upload it to the matching LMS assignment
+  (the PDF lists completed labs, design-challenge outcomes, and their self-explanations). There is no completion code to copy.
 - **Everything is instructor-controllable**: the lab sequence, the difficulty of each challenge, and
   the number of tries are all defined in `juicetification.py`.
 
