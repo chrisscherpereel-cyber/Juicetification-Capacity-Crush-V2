@@ -54,7 +54,15 @@ and then has to engineer** — which is where the idea actually lands.
 - **Each lab shows only its relevant controls and results** — the sidebar and dashboard are
   filtered per lab so a first-time user isn't faced with unused inputs or off-topic feedback.
 - **Per-part progress & submission reports** — the 11 labs form two parts (Part 1 default, Part 2
-  selectable); each part produces a downloadable HTML report of the student's work to upload to the LMS.
+  selectable); each part produces a downloadable **PDF** report of the student's work to upload to the LMS.
+- **Run from the main window or the sidebar** — a Run button sits in the main panel as well as the
+  sidebar, so it's always reachable.
+- **Answers persist across refresh** — each step's multiple-choice / estimate answer is saved (in the
+  page URL, so it survives a browser refresh even without shared storage) and restored when you return.
+- **Start over** — "✅ Your progress → ↺ Start over" clears all progress, answers and reflections and
+  returns to the first step (two-step confirm).
+- **Light theme pinned** — the app ships `.streamlit/config.toml` fixing a light theme (its visuals are
+  designed for a light background); run it in light mode.
 
 ---
 
@@ -132,7 +140,7 @@ the app also saves each student's progress and gives each student a stable, uniq
 
 ### Performance with many simultaneous users
 
-The live “line running” playback is the main per-run cost on the server (it holds the session for a couple of seconds and streams the day-by-day frames). Each user can turn it off with the **Play the run animation** checkbox in the sidebar — unchecking it jumps straight to the results. For a large class, set the environment variable `JCC_ANIMATIONS=off` on the deployment to make the animation **off by default for everyone** (users can still turn it back on individually).
+The live “line running” playback is the main per-run cost on the server (it holds the session for a couple of seconds and streams the day-by-day frames). Each user can turn it off with the **Play the run animation** checkbox in the sidebar — unchecking it jumps straight to the results. The animation is **off by default**; a student can turn it on with the **Play the run animation** checkbox in the sidebar. Set `JCC_ANIMATIONS=on` on the deployment to default it on for everyone instead.
 
 Storage is enabled only when its secrets are set (`DB_ENCRYPTION_KEY` plus Dropbox credentials); it
 requires the `dropbox` and `cryptography` packages, which are listed in `requirements.txt`. **With no

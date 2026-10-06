@@ -370,6 +370,8 @@ def _is_store_progress_key(k):
         return True
     if "_chal_attempts_" in k or "_chal_passed_" in k or "_chal_seen_" in k:
         return True
+    if "_pred_" in k or "_est_" in k:        # the student's MC / numeric answers themselves
+        return True
     return False
 
 
@@ -418,6 +420,48 @@ def _autosave():
             st.session_state["_last_saved"] = enc
     except Exception:
         pass
+
+
+def _get_answers():
+    """Restore saved MC/estimate selections from the compact `ans` URL parameter (once per
+    session), so a browser refresh keeps each step's actual answer — not just which steps are
+    done. Runs before any widget is created, so pre-seeding the widget keys is safe."""
+    if st.session_state.get("_answers_loaded"):
+        return
+    st.session_state["_answers_loaded"] = True
+    raw = st.query_params.get("ans")
+    if not raw:
+        return
+    try:
+        data = json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+    except Exception:
+        return
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(k, str) and ("_pred_" in k or "_est_" in k) and k not in st.session_state:
+                st.session_state[k] = v
+
+
+def _save_answers():
+    """Mirror the current MC/estimate selections into the `ans` URL parameter so they survive a
+    refresh even when shared storage is off (progress already rides in `prog`/`refl`)."""
+    ss = st.session_state
+    data = {k: ss[k] for k in list(ss.keys())
+            if isinstance(k, str) and ("_pred_" in k or "_est_" in k) and ss[k] is not None}
+    try:
+        enc = base64.urlsafe_b64encode(
+            json.dumps(data, separators=(",", ":"), sort_keys=True).encode()).decode()
+        if st.query_params.get("ans") != enc:
+            st.query_params["ans"] = enc
+    except Exception:
+        pass
+
+
+def _on_answer_change():
+    """Fired whenever a prediction/estimate changes: persist it immediately (URL + store) so a
+    changed answer is saved right away, not only when the student advances to the next step."""
+    _save_answers()
+    _autosave()
 
 
 def mark_step_done(prefix, i):
@@ -2545,6 +2589,43 @@ def lab_setup_and_run(prefix):
     # After the run, scroll the fresh result into view and flash the panel — so it's obvious
     # something happened even with the animation off.
     _nav_bump("run")
+
+
+def _request_main_run():
+    """The main-window Run button (not just the sidebar): request a run on the next rerun."""
+    st.session_state["_main_run"] = True
+
+
+def reset_simulation():
+    """Start over: clear ALL lab progress, saved answers, reflections and challenge state, and
+    return to the very first step of Part 1. The line config is reset to defaults too. This is a
+    deliberate, confirmed wipe — distinct from 'Reset to defaults' (line only) and a challenge's
+    'Reset & try again' (that one step)."""
+    ss = st.session_state
+    ss["lab_progress"] = {}
+    ss["reflect_done"] = set()
+    for k in list(ss.keys()):
+        if not isinstance(k, str):
+            continue
+        if ("_pred_" in k or "_est_" in k or "_reflect_" in k
+                or "_chal_attempts_" in k or "_chal_passed_" in k or "_chal_seen_" in k
+                or (k.endswith("_step") and k[:-5] in LAB_ORDER)):
+            del ss[k]
+    first = _part_labs(LAB_PART_ORDER[0])[0]
+    ss["lab_part"] = LAB_PART_ORDER[0]
+    ss["lab_choice"] = LAB_CHOICE_LABEL[first]
+    ss[f"{first}_step"] = 0
+    ss["sim_results"] = None
+    ss["_confirm_reset"] = False
+    for _p in ("prog", "refl", "ans"):
+        try:
+            del st.query_params[_p]
+        except Exception:
+            pass
+    reset_line_to_defaults()
+    lab_apply_setup(first, 0, force_reset=True)
+    _nav_bump()
+    _autosave()
 
 
 def _focus_sidebar_cb():
@@ -5226,17 +5307,29 @@ def render_lab(results, prefix):
         else:
             est_cfg = step.get("estimate")
             if est_cfg:
+                # Pre-seed via session_state (set on restore / prior entry); only pass an explicit
+                # default the FIRST time the key is absent, so Streamlit doesn't warn and a saved
+                # answer is shown on return / after a refresh.
+                _ek = f"{prefix}_est_{i}"
+                _ekw = {} if _ek in st.session_state else {"value": None}
                 st.number_input(f"**Estimate:** {_md_escape(est_cfg['prompt'])}",
                                 min_value=float(est_cfg.get("min", 0.0)),
                                 max_value=float(est_cfg["max"]) if est_cfg.get("max") is not None else None,
-                                step=float(est_cfg.get("step", 1.0)), value=None,
-                                key=f"{prefix}_est_{i}", placeholder="type your best estimate")
+                                step=float(est_cfg.get("step", 1.0)),
+                                key=_ek, on_change=_on_answer_change,
+                                placeholder="type your best estimate", **_ekw)
                 if est_cfg.get("hint"):
                     st.caption("💡 " + _md_escape(est_cfg["hint"]))
             else:
-                st.radio(f"**Predict:** {_md_escape(step['q'])}",
-                         [_md_escape(o) for o in step["opts"]], index=None,
-                         key=f"{prefix}_pred_{i}")
+                _pk = f"{prefix}_pred_{i}"
+                _opts = [_md_escape(o) for o in step["opts"]]
+                # Drop a stale saved answer that isn't one of this step's options (e.g. from an
+                # older version) so the radio can't crash on an out-of-range value.
+                if _pk in st.session_state and st.session_state[_pk] not in _opts:
+                    del st.session_state[_pk]
+                _rkw = {} if _pk in st.session_state else {"index": None}
+                st.radio(f"**Predict:** {_md_escape(step['q'])}", _opts,
+                         key=_pk, on_change=_on_answer_change, **_rkw)
             st.button("▶  Set up & run this step", type="primary", use_container_width=True,
                       on_click=lab_setup_and_run, args=(prefix,), key=f"{prefix}_run_{i}")
 
@@ -5317,6 +5410,7 @@ def render_lab(results, prefix):
         nav2.markdown(f'<div class="lab-count">Step {i + 1} of {len(steps)}</div>',
                       unsafe_allow_html=True)
         nav3.button("Next ›", use_container_width=True,
+                    type=("primary" if (answered and i != last) else "secondary"),
                     disabled=(i == last or not answered),
                     on_click=lab_goto, args=(prefix, i + 1), key=f"{prefix}_next_{i}")
 
@@ -5484,6 +5578,10 @@ if _STORE_SID and not st.session_state.get("_restored"):
     st.session_state["_restored"] = True
     _restore_progress(store.load(_STORE_GAME, _STORE_SID))
 
+# Restore saved MC/estimate answers from the URL once (works with or without shared storage),
+# before any widget renders, so a refresh keeps each step's actual selection.
+_get_answers()
+
 # Supplier reliability is stored as a percentage (0–100); the simulation takes a
 # probability in [0, 1]. demand-stream dice are only active when the variable-market
 # switch is on. These derived values feed the simulation everywhere, so both the labs
@@ -5567,6 +5665,17 @@ st.markdown(
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+        /* ---------- Force a light appearance even if the viewer's browser / Streamlit theme
+           is dark, so instruction text never blends into a dark background. Backgrounds and a
+           dark default text colour are set WITHOUT !important, so the explicit colours used by
+           the hero, card titles, primary buttons and metrics still win by source order. */
+        :root, .stApp { color-scheme: light !important; }
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main,
+        [data-testid="stHeader"] { background-color: #f4f6fb !important; }
+        [data-testid="stHeader"] { background: transparent !important; }
+        .stApp, .stApp p, .stApp li, .stApp label,
+        [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] { color: #1f2a44; }
 
         .stMainBlockContainer, .block-container { max-width: 1080px; padding-top: 1.4rem; }
 
@@ -6063,6 +6172,21 @@ with st.sidebar:
                         _STORE_GAME, _STORE_SID, completion_code=f"Part {_pnum}: {_name}",
                         score=(round(100 * _rd["steps_done"] / _rd["steps_total"]) if _rd["steps_total"] else 0))
 
+            # Start the whole simulation over — clears all progress and answers. Two-step
+            # confirm so it can't wipe a student's work on a stray click.
+            if not st.session_state.get("_confirm_reset"):
+                st.button("↺  Start over", use_container_width=True, key="start_over_btn",
+                          on_click=lambda: st.session_state.update(_confirm_reset=True),
+                          help="Clear all progress and answers and go back to the very first step.")
+            else:
+                st.warning("This clears **all** progress, answers and reflections and returns you to "
+                           "the first step. This can't be undone.")
+                _co1, _co2 = st.columns(2)
+                _co1.button("Yes, start over", type="primary", use_container_width=True,
+                            key="start_over_yes", on_click=reset_simulation)
+                _co2.button("Cancel", use_container_width=True, key="start_over_no",
+                            on_click=lambda: st.session_state.update(_confirm_reset=False))
+
     # ---- Operations: the production line (both modes) ----
     with st.container(border=True, key="ops_card"):
         st.markdown('<div class="card-title">🎲 Operations — the production line</div>',
@@ -6368,10 +6492,20 @@ if not IS_LAB:
               help="The slowest station's average output. It sets the pace for the whole line — this is "
                    "the bottleneck (the constraint).")
 
+# A Run button in the MAIN window (not only the sidebar), so it is always reachable without
+# scrolling the sidebar. It requests a run via a flag the trigger picks up below.
+_mrc1, _mrc2 = st.columns([2, 1])
+with _mrc2:
+    st.button("▶  Run this line" if IS_LAB else "▶  Run Simulation",
+              type="primary", use_container_width=True, disabled=bool(errs),
+              key="main_run_btn", on_click=_request_main_run)
+
 # ---- Run trigger: simulate, then play every output back live into a placeholder ----
 SPEED_DELAY = {"Instant": 0.0, "Fast": 0.012, "Normal": 0.03, "Slow": 0.07}
 MAX_ANIM_FRAMES = 240   # cap animation steps so multi-year runs stay snappy
 if st.session_state.pop("lab_autorun", False):
+    run_clicked = True
+if st.session_state.pop("_main_run", False):
     run_clicked = True
 if run_clicked and not errs:
     sim_hours = int(st.session_state["simulation_years"]) * HOURS_PER_YEAR
