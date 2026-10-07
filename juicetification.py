@@ -5725,8 +5725,12 @@ st.markdown(
             padding: 1.7rem 1.9rem; border-radius: 20px; color: #fff;
             box-shadow: 0 14px 34px rgba(234,88,12,0.28); margin-bottom: 1.3rem;
         }
+        /* The hero text sits on the dark gradient, so force white explicitly — the light-theme
+           safety net above sets a dark default on every <p>, which would otherwise override the
+           hero subtitle's inherited white and make it hard to read. */
+        .hero h1, .hero p { color: #fff !important; }
         .hero h1 { margin: 0; font-size: 1.95rem; font-weight: 800; letter-spacing: -0.02em; }
-        .hero p  { margin: 0.4rem 0 0; opacity: 0.92; font-size: 1.0rem; }
+        .hero p  { margin: 0.4rem 0 0; opacity: 0.95; font-size: 1.0rem; }
 
         /* ---------- Cards (keyed containers -> .st-key-<key>) ---------- */
         .st-key-ops_card, .st-key-settings_card, .st-key-actions_card,
