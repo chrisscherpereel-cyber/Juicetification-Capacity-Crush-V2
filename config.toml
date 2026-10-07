@@ -1,0 +1,12 @@
+# Pin a light theme. The app's visuals (hero, cards, instruction text) are designed for a
+# light background; without this, a viewer whose browser/OS prefers dark mode would see some
+# instruction text blend into a dark background. Students should run the app as configured here.
+[theme]
+base = "light"
+primaryColor = "#ea580c"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6fb"
+textColor = "#1f2a44"
+
+[client]
+toolbarMode = "minimal"

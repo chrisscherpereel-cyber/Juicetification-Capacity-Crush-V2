@@ -418,8 +418,13 @@ def _autosave():
             return
         if store.save(_STORE_GAME, _STORE_SID, snap):
             st.session_state["_last_saved"] = enc
+            st.session_state["_last_saved_ts"] = time.time()
+            st.session_state["_save_failed"] = False
+        else:
+            st.session_state["_save_failed"] = True
     except Exception:
-        pass
+        # Record the failure so the UI can warn honestly instead of claiming work was saved.
+        st.session_state["_save_failed"] = True
 
 
 def _get_answers():
@@ -1013,6 +1018,13 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
     produced = [0] * n
     inv_sum = [0.0] * n
     finished = 0
+    # Material-balance + replenishment instrumentation (additive; draws no RNG, changes no
+    # existing output). Lets the test-suite reconcile units and lets the app report the ACTUAL
+    # number of supplier orders instead of inferring it from consumption ÷ order size.
+    initial_material = sum(buffers)   # bottles present across all buffers at hour 0
+    raw_received = 0                  # bottles actually added to the raw buffer over the run
+    delivery_events = 0               # hours a supplier shipment actually arrived
+    orders_placed = 0                 # purchase orders (lots of order_q) actually shipped
     starved_hours = 0    # hours Operation 1 was held back by a lack of raw material
     frames = []          # per-day snapshot for the live dashboard
     inv_scale = 1        # largest inventory seen (for a stable bar axis)
@@ -1061,9 +1073,13 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
             if supply_reliability >= 1.0 or random.random() < supply_reliability:
                 deficit = reorder_point - buffers[0]
                 batches = math.ceil(deficit / order_q)
+                _before = buffers[0]
                 buffers[0] += batches * order_q
                 if buffers[0] > a_limits[0]:
                     buffers[0] = a_limits[0]
+                raw_received += buffers[0] - _before   # actual bottles added (after any cap clip)
+                delivery_events += 1                   # one shipment arrived this hour
+                orders_placed += batches               # lots of order_q on that shipment
 
         # Resolve moves downstream-first: a station that empties its buffer this
         # hour frees space for the one feeding it (a pull / Kanban step). A station
@@ -1261,6 +1277,15 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
         "wip_capped": any(math.isfinite(l) for l in a_limits),
         "starved_hours": starved_hours,
         "service_level": (1.0 - starved_hours / hours) if hours else 1.0,
+        # Material balance (additive): initial + received = finished + scrapped + ending.
+        "initial_material": initial_material,
+        "raw_received": raw_received,
+        "ending_material": sum(buffers),
+        "ending_wip_downstream": sum(buffers[1:]),
+        "material_residual": initial_material + raw_received - finished - scrap_total - sum(buffers),
+        # Actual replenishment events (vs. the EOQ proxy orders=ceil(consumption/order_size)).
+        "delivery_events": delivery_events,
+        "orders_placed": orders_placed,
         "reorder_point": reorder_point,
         "scrap_total": scrap_total,
         "scrap_by_station": [scrap_by_station[p] for p in range(n)],
@@ -5471,8 +5496,13 @@ def render_glossary_card():
                 "**Line efficiency** — actual output ÷ the bottleneck's top speed; the gap is lost to "
                 "fluctuation and the way stations depend on each other.\n\n"
                 "**Finished-goods inventory (FGI)** — completed bottles waiting to be sold.\n\n"
-                "**Service level (fill rate)** — the share of the time the line has what it needs and "
-                "isn't starved.\n\n"
+                "**Service level (raw-material availability)** — in this app, the share of hours "
+                "Operation 1 had raw material to work with and was **not starved**. It measures the "
+                "*supplier/line* side, not the customer side. (Technically this is production "
+                "availability, not a customer service level.)\n\n"
+                "**Fill rate (customer)** — a different measure, shown only when a fluctuating market "
+                "is on: the share of **customer demand** actually sold from finished goods. A line can "
+                "have high raw-material availability and still miss demand, so the two can differ.\n\n"
                 "**Reorder point (ROP)** — the raw-material level that triggers a new supplier "
                 "order.\n\n"
                 "**Safety stock** — extra inventory kept to cover variability, such as an unreliable "
@@ -6140,6 +6170,26 @@ with st.sidebar:
                 f'<div class="prog-rows">{"".join(row_html)}</div>',
                 unsafe_allow_html=True)
 
+            # Assessment honesty: a challenge step counts as "done" once it's resolved — which
+            # includes running out of tries. Report PASSED separately so "out of tries" is never
+            # shown as a pass. (Completed ≠ passed ≠ mastery.)
+            _chal_total = _chal_pass = _chal_attempted = 0
+            for _pre in _part_labs(_cur_part):
+                if _pre not in LABS:
+                    continue
+                for _ci, _cs in enumerate(LABS[_pre]["steps"]):
+                    if _cs.get("challenge"):
+                        _chal_total += 1
+                        if st.session_state.get(f"{_pre}_chal_passed_{_ci}"):
+                            _chal_pass += 1
+                        elif int(st.session_state.get(f"{_pre}_chal_attempts_{_ci}", 0) or 0) > 0:
+                            _chal_attempted += 1
+            if _chal_total:
+                _msg = f"🏆 Challenges passed: **{_chal_pass} of {_chal_total}**"
+                if _chal_attempted:
+                    _msg += f" · ⚠️ {_chal_attempted} attempted but not yet passed (you can Reset & try again)"
+                st.caption(_msg)
+
             with st.expander("📄 Get my report to submit"):
                 st.caption(f"Enter your name and download your **{_cur_part}** report — then upload "
                            "the file to this part's assignment on the LMS. (Part 1 and Part 2 are two "
@@ -6431,10 +6481,78 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# When shared storage is on and the student is identified, show a small confirmation that
-# their work is being saved (the ?sid= in the URL makes a refresh restore state).
-if store.enabled() and _STORE_SID:
-    st.caption(f"Signed in as {_STORE_SID} · progress saved automatically")
+# ---- Honest save / progress status + a storage-independent backup & restore ----
+# Three cases are reported truthfully: (a) shared storage on and saving; (b) a save that
+# FAILED (never claim saved work was saved); (c) no server storage configured, in which case
+# progress still rides in the page URL and a downloadable backup is the portable fallback.
+def _save_status_line():
+    if store.enabled() and _STORE_SID:
+        if st.session_state.get("_save_failed"):
+            st.warning(f"⚠️ Signed in as **{_STORE_SID}**, but the last save did **not** go through. "
+                       "Your latest changes are still in this browser (and in the page link); "
+                       "use **Back up my progress** below so nothing is lost.")
+        else:
+            _ts = st.session_state.get("_last_saved_ts")
+            if _ts:
+                _ago = max(0, int(time.time() - _ts))
+                _when = ("just now" if _ago < 5 else f"{_ago}s ago" if _ago < 60
+                         else f"{_ago // 60}m ago" if _ago < 3600 else "earlier today")
+                st.caption(f"✅ Signed in as **{_STORE_SID}** · progress saved to the course server ({_when}).")
+            else:
+                st.caption(f"✅ Signed in as **{_STORE_SID}** · progress saves automatically to the course server.")
+    else:
+        st.caption("💾 Progress is kept in this page's link (bookmark it to resume on this device). "
+                   "No course server is configured, so use **Back up my progress** below to save a file "
+                   "you can restore anywhere.")
+
+_save_status_line()
+
+with st.expander("💾 Back up / restore my progress"):
+    st.caption("Download a backup file of everything you've done (predictions, answers, reflections, "
+               "challenge attempts and your place in the labs). You can restore it later on any device — "
+               "this works even if the course server storage is off.")
+    try:
+        _backup = {
+            "_backup_kind": "juicetification_progress",
+            "_backup_version": 1,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "snapshot": _progress_snapshot(),
+            "answers": {k: st.session_state[k] for k in list(st.session_state.keys())
+                        if isinstance(k, str) and ("_pred_" in k or "_est_" in k)
+                        and st.session_state[k] is not None},
+        }
+        st.download_button(
+            "⬇️ Back up my progress (.json)",
+            data=json.dumps(_backup, separators=(",", ":")).encode("utf-8"),
+            file_name="capacity_crush_progress.json", mime="application/json",
+            use_container_width=True, key="backup_dl")
+    except Exception:
+        st.info("Backup isn't available right now — try again after your next step.")
+
+    _up = st.file_uploader("Restore from a backup file", type=["json"], key="backup_up",
+                           label_visibility="collapsed")
+    if _up is not None:
+        import hashlib as _hl
+        _raw = _up.getvalue()
+        _sig = _hl.sha256(_raw).hexdigest()
+        if st.session_state.get("_backup_applied") != _sig:
+            try:
+                _data = json.loads(_raw.decode("utf-8"))
+                if isinstance(_data, dict) and _data.get("_backup_kind") == "juicetification_progress":
+                    _restore_progress(_data.get("snapshot", {}))
+                    for _k, _v in (_data.get("answers", {}) or {}).items():
+                        if isinstance(_k, str) and ("_pred_" in _k or "_est_" in _k):
+                            st.session_state[_k] = _v
+                    st.session_state["_backup_applied"] = _sig
+                    _save_answers()
+                    _autosave()
+                    st.success("Progress restored from your backup. ✅")
+                    _nav_bump()
+                    st.rerun()
+                else:
+                    st.error("That file isn't a Capacity Crush progress backup.")
+            except Exception:
+                st.error("Couldn't read that backup file — it may be incomplete or from another app.")
 
 with st.expander("How this works & what each output means"):
     st.markdown(
@@ -6703,11 +6821,16 @@ else:
                     "station — throughput is held down by the tightest cap as well as the constraint.")
     st.caption(cap_msg)
 
-    # ---- Service level (fill rate) & yield readout ----
+    # ---- Raw-material availability, customer fill rate & yield readout ----
+    # These are DISTINCT measures (see glossary): availability is the supplier/line side (hours
+    # Op 1 wasn't starved); fill rate is the customer side (demand actually sold).
     _cfg = results.get("config", {})
     _extra = []
     if _cfg.get("reorder_on") or not results["unlimited_supply"]:
-        _extra.append(("Service level (line fed)", f"{results.get('service_level', 1.0) * 100:.1f}%"))
+        _extra.append(("Raw-material availability",
+                       f"{results.get('service_level', 1.0) * 100:.1f}%"))
+    if results.get("demand_on"):
+        _extra.append(("Customer fill rate", f"{results.get('fill_rate', 1.0) * 100:.1f}%"))
     if _cfg.get("reorder_on"):
         _extra.append(("Reorder point", f"{results.get('reorder_point', 0):,}"))
     if _cfg.get("scrap_on"):

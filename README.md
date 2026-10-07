@@ -49,12 +49,18 @@ and then has to engineer** — which is where the idea actually lands.
   misconception behind it.
 - **Numeric-estimate steps** graded on a tolerance band with a number-line readout.
 - **Open design challenges** with an automated pass/fail check and limited tries.
-- **Self-explanation prompts** after the key reveals; the count is folded into a tamper-evident
-  completion code.
+- **Self-explanation prompts** after the key reveals; what the student writes is saved into their
+  submission report.
 - **Each lab shows only its relevant controls and results** — the sidebar and dashboard are
   filtered per lab so a first-time user isn't faced with unused inputs or off-topic feedback.
-- **Per-part progress & submission reports** — the 11 labs form two parts (Part 1 default, Part 2
-  selectable); each part produces a downloadable **PDF** report of the student's work to upload to the LMS.
+- **Twelve labs in two parts** — ten guided labs plus two diagnostic capstones. Part 1 (Constraints
+  & Flow) holds labs 1–5 and the Part 1 Capstone; Part 2 (Economics & Inventory) holds labs 6–10 and
+  the Part 2 Capstone. Each part produces a downloadable **PDF** report to upload to the LMS — there
+  is **no completion code**; the report is the submission.
+- **Challenge pass is tracked separately from completion** — running out of tries lets a student
+  continue but is reported as *attempted, not passed* (never shown as a pass).
+- **Honest save status + backup/restore** — the app says whether server storage is on, when it last
+  saved, and warns if a save failed; a **JSON backup/restore** works even with no server configured.
 - **Run from the main window or the sidebar** — a Run button sits in the main panel as well as the
   sidebar, so it's always reachable.
 - **Answers persist across refresh** — each step's multiple-choice / estimate answer is saved (in the
@@ -62,7 +68,8 @@ and then has to engineer** — which is where the idea actually lands.
 - **Start over** — "✅ Your progress → ↺ Start over" clears all progress, answers and reflections and
   returns to the first step (two-step confirm).
 - **Light theme pinned** — the app ships `.streamlit/config.toml` fixing a light theme (its visuals are
-  designed for a light background); run it in light mode.
+  designed for a light background); run it in light mode. *(If you re-upload to GitHub via the web UI,
+  include the hidden `.streamlit/` folder — the web uploader silently drops dotfolders.)*
 
 ---
 
@@ -91,9 +98,9 @@ Streamlit will open the simulation in your browser (usually at http://localhost:
   `instructions.pdf` for a one-page visual guide.
 - **Progress is stored in the page URL**, so a student can bookmark or copy the link to resume.
   Work runs entirely in the browser session — no accounts, no server-side data.
-- **Two parts, two assignments.** The 11 labs are split into **Part 1 — Constraints & Flow** (default)
-  and **Part 2 — Economics & Inventory**, chosen at the top of the sidebar. Each part is submitted
-  separately.
+- **Two parts, two assignments.** The twelve labs (ten guided + two capstones) are split into
+  **Part 1 — Constraints & Flow** (default) and **Part 2 — Economics & Inventory**, chosen at the top
+  of the sidebar. Each part is submitted separately, and the two reports are independent.
 - **To collect work**, have each student open **Your progress → Get my report to submit**, enter their
   name, and **download the PDF report** for that part — then upload it to the matching LMS assignment
   (the PDF lists completed labs, design-challenge outcomes, and their self-explanations). There is no completion code to copy.
@@ -116,9 +123,11 @@ app behaves exactly as it always has.**
 - **Configured links** — the Director hands out a self-contained link (`…/?cfg=<encoded>`) that
   pre-fills the sidebar with the instructor's chosen starting values. The app accepts both the
   Director's parameter names and its own internal snapshot format, so older shared links keep working.
-- **Reproducible runs** — adding `…/?seed=<number>` makes every student on the same assignment see the
-  same random draws, which is useful for fair grading of an open design challenge. Without a seed, runs
-  stay fully random.
+- **Scenario seed precedence** — the single source of truth is: **(1)** a seed set on the Director
+  link pins one fixed scenario for everyone on that assignment (useful for fair grading); otherwise
+  **(2)** each student gets their own unique seed, stored in the page URL as `?rs=` so it is stable
+  across reloads while differing between students; otherwise **(3)** fully random. Within a seed, each
+  *re-run* still varies (a per-run counter is added) so repeating a line shows real fluctuation.
 
 No accounts or servers are involved; a configured assignment is just a URL.
 
@@ -132,11 +141,11 @@ the app also saves each student's progress and gives each student a stable, uniq
   there is no gate and nothing changes.
 - **Automatic save/resume** — completed steps, reflections, challenge results, and lab position are
   written to encrypted per-student files after each meaningful step, and restored on load.
-- **Unique per-student scenario** — each student gets their own random scenario seed (kept in the page URL as `?rs=`), so every student sees a different line and re-running shows fresh variability. A Director `?seed=` still overrides this to pin one fixed exercise for the whole class.
-  the same student always faces the same line (and different students get different ones). This takes
-  priority over the Director's `?seed=`; with neither, runs stay fully random.
-- **Completion roster** — when a student generates their completion code, it is also recorded to
-  storage so an instructor can assemble a roster.
+- **Unique per-student scenario** — each student gets their own scenario seed (kept in the page URL
+  as `?rs=`), so every student sees a different line; see the seed-precedence note above for how a
+  Director-set seed overrides this.
+- **Completion roster** — when a student downloads their Part report, that completion is also recorded
+  to storage (score and part), so an instructor can assemble a roster. There is no completion code.
 
 ### Performance with many simultaneous users
 
@@ -170,11 +179,32 @@ Juicetification-Capacity-Crush/
 ├── requirements.txt
 ├── .streamlit/config.toml   # pins the light theme (the UI is designed for a light background)
 ├── README.md
+├── AUDIT.md               # model & assessment audit: verified defects vs. assumptions
 ├── LICENSE
+├── tests/
+│   └── test_model.py      # headless invariant tests (no server needed)
 ├── paper/                 # academic write-up (design rationale + theory)
 │   └── Juicetification_Capacity_Crush_Paper.docx
 └── figures/               # publication-quality figures (PNG + editable SVG)
 ```
+
+---
+
+## Running the tests
+
+The model invariants are checked headlessly — no Streamlit server or browser is needed (a tiny
+stub stands in for `streamlit`):
+
+```
+python tests/test_model.py        # plain runner, or:
+python -m pytest tests/ -q        # if pytest is installed
+```
+
+They cover conservation of units, deterministic reproducibility, scrap/yield reconciliation,
+actual supplier-order counting, Little's-Law compatibility (stationary vs. non-stationary),
+service-level vs. customer fill-rate, completion-vs-pass, Director-config expansion, and
+Part 1/Part 2 report independence. See `AUDIT.md` for what is a verified defect vs. a documented
+modeling assumption.
 
 ---
 
