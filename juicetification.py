@@ -4008,7 +4008,8 @@ LAB_SS = [
         "setup": "6 × (1 die × 6) · 🚚 supplier 50% reliable · small orders (10) · reorder point 5",
         "apply": _ss_apply(5),
         "estimate": {
-            "prompt": "Estimate the service level — the % of hours the line has material to work with:",
+            "prompt": "Estimate the service level — here, the % of hours Operation 1 has raw material "
+                      "to work with (its raw-material availability, not a customer fill rate):",
             "unit": "%", "actual": lambda r: r["service_level"] * 100.0, "tol": 0.12,
             "min": 0.0, "max": 100.0, "step": 1.0,
             "hint": "The supplier delivers only half the time, and there's almost no cushion (reorder "
@@ -4605,8 +4606,8 @@ LAB_DIAG2 = [
             "hint": "Lower the raw-material order size toward the bottom of the U-shaped cost curve — "
                     "the EOQ for this line is roughly 180.",
             "targets": [
-                {"label": "Order size vs EOQ", "get": lambda r: int(r["config"].get("order_size", 0)),
-                 "fmt": "{:,} bottles", "goal": "within ~100 of EOQ",
+                {"label": "Order size (bottles)", "get": lambda r: int(r["config"].get("order_size", 0)),
+                 "fmt": "{:,} bottles", "goal": "within ≈ 100 of the EOQ",
                  "ok": lambda r: abs(int(r["config"].get("order_size", 0))
                                      - (r.get("eoq_scan", {}).get("eoq") or 184)) <= 100},
             ],
