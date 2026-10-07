@@ -5696,16 +5696,55 @@ st.markdown(
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-        /* ---------- Force a light appearance even if the viewer's browser / Streamlit theme
-           is dark, so instruction text never blends into a dark background. Backgrounds and a
-           dark default text colour are set WITHOUT !important, so the explicit colours used by
-           the hero, card titles, primary buttons and metrics still win by source order. */
+        /* ---------- Force a readable LIGHT appearance regardless of the viewer's browser or
+           Streamlit theme. config.toml pins a light theme, but not every deployment honours it,
+           so we force light surfaces + dark text with !important here, then restore WHITE text
+           on the only two things that sit on a dark/gradient background: the hero and the
+           primary button. This keeps the whole app readable even when the viewer is in dark mode. */
         :root, .stApp { color-scheme: light !important; }
         .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main,
-        [data-testid="stHeader"] { background-color: #f4f6fb !important; }
+        [data-testid="stHeader"], section[data-testid="stSidebar"],
+        [data-testid="stSidebarContent"] { background-color: #f4f6fb !important; }
         [data-testid="stHeader"] { background: transparent !important; }
-        .stApp, .stApp p, .stApp li, .stApp label,
-        [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] { color: #1f2a44; }
+        .stApp, .stApp p, .stApp li, .stApp label, .stApp span,
+        [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"],
+        [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] * { color: #1f2a44; }
+
+        /* Inputs: light fields with dark text, even in dark mode (otherwise they render as
+           unreadable black boxes). Cover the baseweb wrappers AND the real input element. */
+        div[data-testid="stNumberInput"] [data-baseweb="input"],
+        div[data-testid="stNumberInput"] [data-baseweb="base-input"],
+        div[data-testid="stNumberInput"] input,
+        div[data-testid="stTextInput"] [data-baseweb="input"],
+        div[data-testid="stTextInput"] [data-baseweb="base-input"],
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextArea"] [data-baseweb="base-input"],
+        div[data-testid="stTextArea"] textarea,
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="menu"], div[data-baseweb="popover"] li {
+            background-color: #f7f9ff !important; color: #1f2a44 !important;
+        }
+        div[data-testid="stNumberInput"] input,
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextArea"] textarea {
+            -webkit-text-fill-color: #1f2a44 !important;   /* some engines override `color` here */
+        }
+
+        /* Secondary (non-primary) buttons: light with dark text, readable in any theme. */
+        div[data-testid="stButton"] > button:not([data-testid="stBaseButton-primary"]) {
+            background-color: #ffffff !important; color: #1f2a44 !important;
+        }
+
+        /* The ONLY elements on a dark/gradient background keep WHITE text (incl. their children,
+           which otherwise inherit the dark default above). */
+        .hero, .hero * { color: #fff !important; }
+        button[data-testid="stBaseButton-primary"],
+        button[data-testid="stBaseButton-primary"] * {
+            color: #fff !important; -webkit-text-fill-color: #fff !important;
+        }
+
+        /* Expanders & message boxes readable on light. */
+        [data-testid="stExpander"] { background: #ffffff !important; }
 
         .stMainBlockContainer, .block-container { max-width: 1080px; padding-top: 1.4rem; }
 
@@ -5801,10 +5840,11 @@ st.markdown(
         .st-key-ops_card div[data-testid="stButton"] > button {
             min-height: 17px; height: 17px; width: 100%; padding: 0 !important;
             font-size: 0.55rem; font-weight: 800; line-height: 1;
-            border: 1px solid #d8e0f3; color: #ea580c; background: #fff;
+            border: 1px solid #d8e0f3; color: #ea580c !important; background: #fff !important;
         }
         .st-key-ops_card div[data-testid="stButton"] > button:hover {
-            background: #eef2ff; border-color: #ea580c; transform: none; box-shadow: none; color: #9a3412;
+            background: #eef2ff !important; border-color: #ea580c; transform: none; box-shadow: none;
+            color: #9a3412 !important;
         }
         /* join the two arrows into one spinner: up = top corners, down = bottom corners */
         .st-key-ops_card [data-testid="stColumn"]
