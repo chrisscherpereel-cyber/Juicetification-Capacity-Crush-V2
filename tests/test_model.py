@@ -280,6 +280,20 @@ def test_part_reports_are_independent():
     assert p1 | p2 == set(APP.LAB_ORDER)
 
 
+def test_private_rng_is_isolated_and_equivalent():
+    """Concurrent Streamlit sessions share one process. A run on a private random.Random must
+    (a) equal the legacy global-seeded run, and (b) be unaffected by other sessions touching the
+    global `random` stream in between."""
+    kw = dict(track_flow=False, demand_dice=1, demand_faces=6, supply_reliability=0.9)
+    legacy = _run([1, 1, 1], [6, 6, 6], seed=11, **kw)["total_output"]
+    a, b = random.Random(11), random.Random(11)
+    args = (_pad([1, 1, 1]), _pad([6, 6, 6]), 0, H, 0.9, None)
+    r1 = APP.run_simulation(*args, track_flow=False, demand_dice=1, demand_faces=6, rng=a)
+    random.seed(999)                      # another "session" reseeds the global stream
+    r2 = APP.run_simulation(*args, track_flow=False, demand_dice=1, demand_faces=6, rng=b)
+    assert r1["total_output"] == r2["total_output"] == legacy
+
+
 # --------------------------------------------------------------------------------------
 # Plain-python runner (so the suite works without pytest installed).
 # --------------------------------------------------------------------------------------

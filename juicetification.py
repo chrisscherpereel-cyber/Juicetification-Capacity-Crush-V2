@@ -35,6 +35,16 @@ st.set_page_config(
 # the app behaves exactly as before. (Instructor config still arrives through the app's
 # own ?cfg= snapshot mechanism below; DIRECTOR_CTX is used only for the shared seed.)
 serve_manifest_if_requested(MANIFEST)
+
+
+def _session_rng():
+    """This session's private random.Random. The module-level `random` stream is process-wide
+    and every Streamlit session shares it, so seeding it per student would let concurrent
+    students overwrite each other's streams. Seeding this instance is equivalent but isolated."""
+    if "_rng" not in st.session_state:
+        st.session_state["_rng"] = random.Random()
+    return st.session_state["_rng"]
+
 _DIRECTOR_PARAMS, DIRECTOR_CTX = resolve_config(MANIFEST)
 
 # =========================================================
@@ -72,7 +82,7 @@ else:
     except (TypeError, ValueError):
         SCENARIO_SEED = None
     if SCENARIO_SEED is None:
-        SCENARIO_SEED = random.randint(1, 1_000_000_000)
+        SCENARIO_SEED = random.SystemRandom().randint(1, 1_000_000_000)
         try:
             st.query_params["rs"] = str(SCENARIO_SEED)
         except Exception:
@@ -939,7 +949,7 @@ def _pop_fifo(q, k):
 
 def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_limits=None,
                    track_flow=True, demand_dice=0, demand_faces=0, order_size=1,
-                   reorder_point=None, scrap=None):
+                   reorder_point=None, scrap=None, rng=None):
     """Juice-bottling line: a serial production line of bottling stations.
 
     Active stations (dice>0 and faces>0) form the line. Each hour a station's
@@ -1048,6 +1058,10 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
     # waiting in front of station p (p>=1). flow_counts maps flow-time(hours)->units.
     tq = [deque() for _ in range(n)]
     flow_counts = {}
+    # Per-call RNG: Streamlit serves every session from one process, so the module-level `random`
+    # stream is shared by all students. Callers pass their own random.Random; None falls back to
+    # the module stream (single-user / test use).
+    _rnd = rng if rng is not None else random
     flow_sum = 0
     flow_n = 0
     if track_flow:
@@ -1065,7 +1079,7 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
     daily_accum = 0
     for hour in range(1, hours + 1):
         potentials = [
-            sum(random.randint(1, a_sides[p]) for _ in range(a_caps[p]))
+            sum(_rnd.randint(1, a_sides[p]) for _ in range(a_caps[p]))
             for p in range(n)
         ]
 
@@ -1076,7 +1090,7 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
         #     raw-material inventory; order_q = 1 is just-in-time. At 100% reliability the
         #     buffer is always refilled before Op 1 works, so Op 1 is never starved. ---
         if buffers[0] < reorder_point:
-            if supply_reliability >= 1.0 or random.random() < supply_reliability:
+            if supply_reliability >= 1.0 or _rnd.random() < supply_reliability:
                 deficit = reorder_point - buffers[0]
                 batches = math.ceil(deficit / order_q)
                 _before = buffers[0]
@@ -1151,7 +1165,7 @@ def run_simulation(caps, sides, start_inv, hours, supply_reliability=1.0, wip_li
         # --- finished goods meet the market ---
         fgi += moved[n - 1]
         if demand_on:
-            d = sum(random.randint(1, demand_faces) for _ in range(demand_dice))
+            d = sum(_rnd.randint(1, demand_faces) for _ in range(demand_dice))
             sold_now = fgi if d >= fgi else d
             fgi -= sold_now
             sold += sold_now
@@ -1763,7 +1777,7 @@ def compute_die_scan(caps, base_sides, start_inv, hours, supply_reliability, wip
         sides_d = [d if a else 0 for a in active]
         res = run_simulation(caps, sides_d, start_inv, hours, supply_reliability, wip_limits,
                              track_flow=False, demand_dice=demand_dice, demand_faces=demand_faces,
-                             order_size=order_size)
+                             order_size=order_size, rng=random.Random(20260629))
         if res is None:
             continue
         out.append({
@@ -1836,10 +1850,8 @@ def build_profit_curve_html(curve, current_faces=None):
 def eoq_annual_demand(caps, sides, hours):
     """Annual raw-material consumption with a reliable, well-stocked supplier — the
     'D' in the EOQ formula. Order size doesn't change throughput, so this is stable."""
-    state = random.getstate()
-    random.seed(20260629)
-    r = run_simulation(caps, sides, 0, hours, 1.0, order_size=4000)
-    random.setstate(state)
+    r = run_simulation(caps, sides, 0, hours, 1.0, order_size=4000,
+                       rng=random.Random(20260629))
     return r["total_output"]
 
 
@@ -1872,10 +1884,9 @@ def compute_eoq_scan(caps, sides, hours, reliability, order_cost, margin, qs=Non
         qs = qs + [max(1, int(include_q))]
     qs = sorted(set(q for q in qs if q >= 1))
     rows = []
-    state = random.getstate()
     for Q in qs:
-        random.seed(20260629)
-        r = run_simulation(caps, sides, 0, hours, reliability, order_size=Q)
+        r = run_simulation(caps, sides, 0, hours, reliability, order_size=Q,
+                           rng=random.Random(20260629))
         avg_raw = sum(r["raw_series"]) / len(r["raw_series"]) if r["raw_series"] else 0.0
         orders = math.ceil(Dr / Q) if Q > 0 else 0
         ordering = orders * order_cost
@@ -1885,7 +1896,6 @@ def compute_eoq_scan(caps, sides, hours, reliability, order_cost, margin, qs=Non
         rows.append({"Q": Q, "orders": orders, "ordering": ordering, "holding": holding,
                      "stockout": stockout, "total": ordering + holding + stockout,
                      "avg_raw": avg_raw, "thru": r["total_output"], "starved": r["starved_hours"]})
-    random.setstate(state)
     best = min(rows, key=lambda x: x["total"])
     return {"D": Dr, "H": H, "S": order_cost, "margin": margin, "eoq": eoq,
             "reliability": reliability, "rows": rows, "best_q": best["Q"], "best_total": best["total"]}
@@ -2055,13 +2065,14 @@ def numeric_histogram_series(values, nbins=18, name="Count"):
 
 
 def run_replications(caps, sides, start_inv, hours, supply, wip_limits, years, fin,
-                     n_reps, progress=None, demand_dice=0, demand_faces=0, order_size=1):
+                     n_reps, progress=None, demand_dice=0, demand_faces=0, order_size=1, rng=None):
     """Run the line n_reps times (fresh randomness each time) and collect the annual
     metrics whose spread is the lesson: throughput, WIP, flow time, efficiency, profit."""
     out = {"throughput": [], "wip": [], "flow": [], "efficiency": [], "profit": []}
     for k in range(n_reps):
         r = run_simulation(caps, sides, start_inv, hours, supply, wip_limits, track_flow=False,
-                           demand_dice=demand_dice, demand_faces=demand_faces, order_size=order_size)
+                           demand_dice=demand_dice, demand_faces=demand_faces, order_size=order_size,
+                           rng=rng)
         if r is not None:
             f = compute_financials(r, caps, sides, years, fin)
             out["throughput"].append(r["total_output"])
@@ -2908,14 +2919,10 @@ LAB_FIN = [
 
 
 def _var_year(dice, sides, rel=1.0, si=0, dd=0, df=0, seed=20260629):
-    """Run a one-year reference line for in-reveal comparisons, preserving the global
-    RNG so the comparison number is stable without disturbing the rest of the app."""
-    state = random.getstate()
-    random.seed(seed)
-    r = run_simulation(dice, sides, si, HOURS_PER_YEAR, rel, None, track_flow=False,
-                       demand_dice=dd, demand_faces=df)
-    random.setstate(state)
-    return r
+    """Run a one-year reference line for in-reveal comparisons on a private, fixed-seed RNG so
+    the comparison number is stable and never touches any other session's random stream."""
+    return run_simulation(dice, sides, si, HOURS_PER_YEAR, rel, None, track_flow=False,
+                          demand_dice=dd, demand_faces=df, rng=random.Random(seed))
 
 
 def _rev_var_length(r):
@@ -6295,26 +6302,47 @@ with st.sidebar:
                 else:
                     _pnum = "1" if _cur_part == LAB_PART_ORDER[0] else "2"
                     _slug = re.sub(r"[^A-Za-z0-9]+", "_", _name).strip("_")[:30] or "student"
-                    try:
-                        _report = build_part_report_pdf(_cur_part, _name)
+                    # Build the report only when asked. Streamlit reruns this whole script on every
+                    # widget click, so building the PDF and writing the completion record inline
+                    # meant ~every click did that work (and a Dropbox upload) for every student.
+                    _rk = f"_rpt_{_pnum}"
+                    if st.button("📄 Prepare my report", use_container_width=True, key=f"prep_{_rk}"):
+                        try:
+                            _rep = {"name": _name, "data": build_part_report_pdf(_cur_part, _name),
+                                    "file": f"CapacityCrush_Part{_pnum}_{_slug}.pdf",
+                                    "mime": "application/pdf", "pdf": True}
+                        except Exception:
+                            _rep = {"name": _name,
+                                    "data": build_part_report_html(_cur_part, _name).encode("utf-8"),
+                                    "file": f"CapacityCrush_Part{_pnum}_{_slug}.html",
+                                    "mime": "text/html", "pdf": False}
+                        st.session_state[_rk] = _rep
+                        # Record this part's completion to the shared roster (no-op when storage
+                        # is off); skipped when identical to the last record this session wrote.
+                        _rd = _report_data(_cur_part)
+                        _code = f"Part {_pnum}: {_name}"
+                        _score = (round(100 * _rd["steps_done"] / _rd["steps_total"])
+                                  if _rd["steps_total"] else 0)
+                        if st.session_state.get("_last_completion") != (_code, _score):
+                            try:
+                                store.record_completion(_STORE_GAME, _STORE_SID,
+                                                        completion_code=_code, score=_score)
+                                st.session_state["_last_completion"] = (_code, _score)
+                            except Exception:
+                                pass
+                    _rep = st.session_state.get(_rk)
+                    if _rep and _rep["name"] == _name:
                         st.download_button(
-                            "⬇️ Download my report (PDF)", data=_report,
-                            file_name=f"CapacityCrush_Part{_pnum}_{_slug}.pdf",
-                            mime="application/pdf", use_container_width=True, key="dl_report")
-                        st.caption("Download the PDF and upload it to this part's assignment on the LMS.")
-                    except Exception:
-                        st.download_button(
-                            "⬇️ Download my report (.html)",
-                            data=build_part_report_html(_cur_part, _name).encode("utf-8"),
-                            file_name=f"CapacityCrush_Part{_pnum}_{_slug}.html",
-                            mime="text/html", use_container_width=True, key="dl_report")
-                        st.caption("Download and upload it to this part's assignment on the LMS "
-                                   "(Print → Save as PDF in your browser if PDF is required).")
-                    # Record this part's completion to the shared roster (no-op when storage is off).
-                    _rd = _report_data(_cur_part)
-                    store.record_completion(
-                        _STORE_GAME, _STORE_SID, completion_code=f"Part {_pnum}: {_name}",
-                        score=(round(100 * _rd["steps_done"] / _rd["steps_total"]) if _rd["steps_total"] else 0))
+                            "⬇️ Download my report (PDF)" if _rep["pdf"] else "⬇️ Download my report (.html)",
+                            data=_rep["data"], file_name=_rep["file"], mime=_rep["mime"],
+                            use_container_width=True, key="dl_report")
+                        if _rep["pdf"]:
+                            st.caption("Download the PDF and upload it to this part's assignment on the LMS.")
+                        else:
+                            st.caption("Download and upload it to this part's assignment on the LMS "
+                                       "(Print → Save as PDF in your browser if PDF is required).")
+                    else:
+                        st.caption("Press **Prepare my report** to build it with your latest progress.")
 
             # Start the whole simulation over — clears all progress and answers. Two-step
             # confirm so it can't wipe a student's work on a stray click.
@@ -6720,7 +6748,7 @@ with _mrc2:
 
 # ---- Run trigger: simulate, then play every output back live into a placeholder ----
 SPEED_DELAY = {"Instant": 0.0, "Fast": 0.012, "Normal": 0.03, "Slow": 0.07}
-MAX_ANIM_FRAMES = 240   # cap animation steps so multi-year runs stay snappy
+MAX_ANIM_FRAMES = 90    # cap animation steps: each frame is a websocket push and holds a server thread
 if st.session_state.pop("lab_autorun", False):
     run_clicked = True
 if st.session_state.pop("_main_run", False):
@@ -6741,7 +6769,7 @@ if run_clicked and not errs:
     # than an identical result. run_counter starts at 0, so a student's/section's *first* run is
     # still identical for fair setup; each repeat draws a new (but deterministic) sample.
     if SCENARIO_SEED is not None:
-        random.seed(SCENARIO_SEED + int(st.session_state.get("run_counter", 0)))
+        _session_rng().seed(SCENARIO_SEED + int(st.session_state.get("run_counter", 0)))
     # Show a spinner while the run computes, so the previous dashboard reads as "updating" rather
     # than lingering as a confusing ghost of the last run.
     with st.spinner("Running the line…"):
@@ -6753,7 +6781,7 @@ if run_clicked and not errs:
             wip_limits,
             demand_dice=dd, demand_faces=df,
             order_size=int(st.session_state["fin_order_size"]),
-            reorder_point=_rop, scrap=_scrap,
+            reorder_point=_rop, scrap=_scrap, rng=_session_rng(),
         )
     if full:
         if SHOW_EOQ:
@@ -6815,6 +6843,10 @@ if run_clicked and not errs:
                 frame_ph.html(build_live_dashboard(fr, full))
                 time.sleep(delay)
             frame_ph.empty()          # clear the animation; final dashboard renders below
+    if full:
+        # Frames are only needed for the playback above (already sampled into `shown`); don't keep
+        # the full per-hour frame list alive in session_state for the rest of the session.
+        full["frames"] = []
     st.session_state["sim_results"] = full
     st.session_state["run_counter"] = st.session_state.get("run_counter", 0) + 1
     results = full
@@ -6843,6 +6875,7 @@ if reps_clicked and not errs:
         progress=lambda k, n: prog.progress(k / n, text=f"Replication {k} of {n}…"),
         demand_dice=dd, demand_faces=df,
         order_size=int(st.session_state["fin_order_size"]),
+        rng=_session_rng(),
     )
     prog.empty()
     rep["meta"] = {
