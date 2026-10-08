@@ -103,8 +103,8 @@ ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "off").strip().lower() 
 # re-render on every interaction. They're ON by default, but a student can switch them off to
 # keep just the numbers, and an instructor can default the whole class to OFF with
 # JCC_CHARTS=off to cut server/bandwidth load on Streamlit Cloud's single CPU.
-CHARTS_DEFAULT_ON = os.environ.get("JCC_CHARTS", "on").strip().lower() not in (
-    "0", "off", "false", "no", "disable", "disabled")
+CHARTS_DEFAULT_ON = os.environ.get("JCC_CHARTS", "off").strip().lower() in (
+    "1", "on", "true", "yes", "enable", "enabled")
 SIDES_MIN, SIDES_MAX = 0, 100
 
 # ---- Per-station WIP (work-in-process) limit ----
@@ -5872,7 +5872,22 @@ st.markdown(
         /* ---------- Generic buttons (Run / Reset / settings) ---------- */
         div[data-testid="stButton"] > button {
             border-radius: 10px; font-weight: 700; min-height: 2.6rem;
-            border: 1px solid #d8e0f3; transition: all .15s ease;
+            border: 1px solid #d8e0f3; transition: transform .06s ease, box-shadow .12s ease,
+                                                    background-color .12s ease, filter .12s ease;
+        }
+        /* Immediate click feedback (no server round-trip needed): the button visibly presses in
+           and flashes an orange ring the instant it's clicked, and holds a "busy" look while the
+           app reruns, so a student always knows their click registered. */
+        div[data-testid="stButton"] > button:hover { border-color: #ea580c; }
+        div[data-testid="stButton"] > button:active {
+            transform: translateY(1px) scale(0.98) !important;
+            box-shadow: 0 0 0 3px rgba(234,88,12,0.45), inset 0 2px 5px rgba(0,0,0,0.12) !important;
+            filter: brightness(0.96);
+        }
+        /* After the click, the button keeps keyboard/mouse focus during the rerun — show that as
+           a steady orange ring so "I pressed it, it's working" is obvious. */
+        div[data-testid="stButton"] > button:focus:not(:active) {
+            box-shadow: 0 0 0 3px rgba(234,88,12,0.35) !important; outline: none !important;
         }
         button[data-testid="stBaseButton-primary"] {
             background: linear-gradient(135deg, #ea580c, #6d83f8) !important;
@@ -5882,6 +5897,31 @@ st.markdown(
         button[data-testid="stBaseButton-primary"]:hover {
             filter: brightness(1.06); color: #fff !important; transform: translateY(-1px);
         }
+        button[data-testid="stBaseButton-primary"]:active {
+            transform: translateY(1px) scale(0.985) !important;
+            box-shadow: 0 0 0 3px rgba(234,88,12,0.55), inset 0 2px 6px rgba(0,0,0,0.25) !important;
+            filter: brightness(0.94) !important;
+        }
+
+        /* ---------- "Show charts" switch — made deliberately prominent ---------- */
+        .st-key-charts_toggle_card {
+            background: linear-gradient(135deg, #fff7ed 0%, #ffffff 70%) !important;
+            border: 1.5px solid #fdba74 !important; border-left: 5px solid #ea580c !important;
+            border-radius: 14px !important; box-shadow: 0 4px 14px rgba(234,88,12,0.10) !important;
+            padding: 0.7rem 1.0rem !important; margin: 0.2rem 0 0.8rem !important;
+        }
+        .st-key-charts_toggle_card::before { content: none !important; }  /* no top accent bar */
+        .charts-toggle-lead { color: #7a3e00; font-size: 0.92rem; line-height: 1.35; }
+        .charts-toggle-lead b { color: #9a3412; font-size: 1.0rem; }
+        .charts-toggle-lead span { color: #9a5a33; font-size: 0.82rem; }
+        /* Enlarge the toggle control itself and colour it orange so the switch is unmissable. */
+        .st-key-charts_toggle_card div[data-testid="stToggle"] { transform: scale(1.25);
+            transform-origin: right center; margin-top: 0.4rem; }
+        .st-key-charts_toggle_card div[data-testid="stToggle"] label { justify-content: flex-end; }
+        .charts-off-note { background: #fffaeb; border: 1px solid #fde3a7; border-left: 4px solid #f59e0b;
+            border-radius: 9px; padding: 8px 12px; margin: 2px 0 10px; color: #8a5300;
+            font-size: 0.88rem; font-weight: 500; }
+        .charts-off-note b { color: #7a3e00; }
 
         /* ---------- Metrics & pills ---------- */
         div[data-testid="stMetric"] {
@@ -6881,15 +6921,24 @@ else:
                     "station — throughput is held down by the tightest cap as well as the constraint.")
     st.caption(cap_msg)
 
-    # Charts are the heaviest thing to draw and redraw every interaction. The on/off switch lives
-    # here (contextually, with the results); SHOW_CHARTS was already read from session above so
-    # every section agrees on it this run.
-    st.checkbox(
-        "📊 Show charts", key="show_charts",
-        help="Charts are the heaviest part to render. Turn them off to keep just the numbers and "
-             "the per-operation panel — lighter on the server when the whole class is online.")
+    # Charts are the heaviest thing to draw and redraw every interaction, so they're OFF by
+    # default. A prominent switch (contextually placed with the results) turns them on. SHOW_CHARTS
+    # was already read from session above so every section agrees on it this run.
+    with st.container(border=True, key="charts_toggle_card"):
+        _tc1, _tc2 = st.columns([0.62, 0.38])
+        with _tc1:
+            st.markdown('<div class="charts-toggle-lead">📊 <b>Charts &amp; graphs</b><br>'
+                        '<span>Line/bar charts and the cost-curve pictures. Off by default to keep the '
+                        'app fast for everyone; flip the switch to see them.</span></div>',
+                        unsafe_allow_html=True)
+        with _tc2:
+            st.toggle("Show charts", key="show_charts",
+                      help="Turn on to draw the graphs for this run. The numbers, tables and the "
+                           "per-operation panel always show either way.")
     if not SHOW_CHARTS:
-        st.caption("Charts are hidden to keep things fast — tick **📊 Show charts** above to see them.")
+        st.markdown('<div class="charts-off-note">📊 Charts are <b>off</b> — the numbers and the '
+                    'per-operation panel below are live. Flip <b>Show charts</b> above to add the graphs.'
+                    '</div>', unsafe_allow_html=True)
 
     # ---- Raw-material availability, customer fill rate & yield readout ----
     # These are DISTINCT measures (see glossary): availability is the supplier/line side (hours
