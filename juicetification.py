@@ -99,6 +99,12 @@ CAP_MIN, CAP_MAX = 0, 20
 # server cost: it holds the session for a couple of seconds and streams ~240 frames).
 ANIMATIONS_DEFAULT_ON = os.environ.get("JCC_ANIMATIONS", "off").strip().lower() in (
     "1", "on", "true", "yes", "enable", "enabled")
+# Charts (the line/bar charts and cost-curve pictures) are the heaviest thing to render and
+# re-render on every interaction. They're ON by default, but a student can switch them off to
+# keep just the numbers, and an instructor can default the whole class to OFF with
+# JCC_CHARTS=off to cut server/bandwidth load on Streamlit Cloud's single CPU.
+CHARTS_DEFAULT_ON = os.environ.get("JCC_CHARTS", "on").strip().lower() not in (
+    "0", "off", "false", "no", "disable", "disabled")
 SIDES_MIN, SIDES_MAX = 0, 100
 
 # ---- Per-station WIP (work-in-process) limit ----
@@ -6639,6 +6645,12 @@ sides = [int(st.session_state[f"sides_{i}"]) for i in range(N_OPS)]
 errs = validation_errors(caps, sides)
 results = st.session_state["sim_results"]
 
+# Whether to render the charts/curves (the heaviest visuals). Defined unconditionally here so
+# every section — the dashboard, the replication card, A/B comparison — can read it; the actual
+# on/off checkbox is drawn in the results area below and writes this same session key.
+st.session_state.setdefault("show_charts", CHARTS_DEFAULT_ON)
+SHOW_CHARTS = bool(st.session_state["show_charts"])
+
 active = [(c > 0 and s > 0) for c, s in zip(caps, sides)]
 exp_avg = [round(c * (s + 1) / 2, 2) if a else 0.0 for c, s, a in zip(caps, sides, active)]
 exp_min = [c if a else 0 for c, a in zip(caps, active)]
@@ -6869,6 +6881,16 @@ else:
                     "station — throughput is held down by the tightest cap as well as the constraint.")
     st.caption(cap_msg)
 
+    # Charts are the heaviest thing to draw and redraw every interaction. The on/off switch lives
+    # here (contextually, with the results); SHOW_CHARTS was already read from session above so
+    # every section agrees on it this run.
+    st.checkbox(
+        "📊 Show charts", key="show_charts",
+        help="Charts are the heaviest part to render. Turn them off to keep just the numbers and "
+             "the per-operation panel — lighter on the server when the whole class is online.")
+    if not SHOW_CHARTS:
+        st.caption("Charts are hidden to keep things fast — tick **📊 Show charts** above to see them.")
+
     # ---- Raw-material availability, customer fill rate & yield readout ----
     # These are DISTINCT measures (see glossary): availability is the supplier/line side (hours
     # Op 1 wasn't starved); fill rate is the customer side (demand actually sold).
@@ -6913,23 +6935,24 @@ else:
                 fgi=(results.get("end_fgi", 0) if results.get("show_fgi", results.get("demand_on")) else None),
             ))
 
-        with st.container(border=True, key="results_card"):
-            st.markdown('<div class="card-title">Cumulative bottles finished</div>', unsafe_allow_html=True)
-            st.line_chart(results["df_cum"], height=240)
+        if SHOW_CHARTS:
+            with st.container(border=True, key="results_card"):
+                st.markdown('<div class="card-title">Cumulative bottles finished</div>', unsafe_allow_html=True)
+                st.line_chart(results["df_cum"], height=240)
 
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                st.markdown('<div class="card-title">Total WIP over time</div>', unsafe_allow_html=True)
-                st.line_chart(results["df_wip"], height=220)
-            with cc2:
-                st.markdown('<div class="card-title">Ending WIP by station</div>', unsafe_allow_html=True)
-                if len(results["df_end"]) > 0:
-                    st.bar_chart(results["df_end"], height=220)
-                else:
-                    st.info("Single-station line — no inter-station WIP.")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    st.markdown('<div class="card-title">Total WIP over time</div>', unsafe_allow_html=True)
+                    st.line_chart(results["df_wip"], height=220)
+                with cc2:
+                    st.markdown('<div class="card-title">Ending WIP by station</div>', unsafe_allow_html=True)
+                    if len(results["df_end"]) > 0:
+                        st.bar_chart(results["df_end"], height=220)
+                    else:
+                        st.info("Single-station line — no inter-station WIP.")
 
-        with st.expander("Bottles finished each day"):
-            st.line_chart(results["df_daily"], height=220)
+            with st.expander("Bottles finished each day"):
+                st.line_chart(results["df_daily"], height=220)
 
     # ---- Inventory at the ends of the line — raw material and finished goods on
     #      their own charts (raw always; finished goods only when demand fluctuates) ----
@@ -6949,7 +6972,8 @@ else:
                     f'of Operation 1 — this is the inventory at Op 1. With an order size of '
                     f'<b>{osz:,}</b> bottles{jit}, the supplier delivers in batches that draw down as '
                     f'the line consumes them.</div>', unsafe_allow_html=True)
-                st.line_chart(results["df_raw"], height=240, color="#0ea5e9")
+                if SHOW_CHARTS:
+                    st.line_chart(results["df_raw"], height=240, color="#0ea5e9")
                 rc = st.columns(3)
                 rc[0].metric("Avg raw material on hand", f"{avg_raw:,.0f}")
                 rc[1].metric("Peak raw material",
@@ -6961,7 +6985,8 @@ else:
                     '<div class="card-sub" style="margin-top:14px"><b style="color:#7c3aed">Finished '
                     'goods</b> (bottled juice) piling up after the last station whenever the line '
                     'out-produces a fluctuating market.</div>', unsafe_allow_html=True)
-                st.line_chart(results["df_fgi"], height=240, color="#9333ea")
+                if SHOW_CHARTS:
+                    st.line_chart(results["df_fgi"], height=240, color="#9333ea")
                 fc = st.columns(3)
                 fc[0].metric("Avg finished goods", f"{results.get('avg_fgi', 0):,.0f}",
                              help="Finished bottles made but not yet sold — finished-goods inventory "
@@ -7013,7 +7038,7 @@ else:
                            f"projection. That gap *is* the instability.")
 
             hist = flow_histogram_series(results.get("flow_counts"))
-            if hist is not None and len(hist) > 1:
+            if SHOW_CHARTS and hist is not None and len(hist) > 1:
                 st.markdown('<div class="card-title" style="margin-top:0.6rem">Flow-time distribution'
                             '</div>', unsafe_allow_html=True)
                 st.markdown('<div class="card-sub">Spread of actual lead times — what customers '
@@ -7053,7 +7078,8 @@ else:
                 em4.metric("Your order size", f"{cur['Q']:,}",
                            help="The order size currently set in the Variability card.")
 
-            st.html(build_eoq_curve_html(scan, current_q=cur_q))
+            if SHOW_CHARTS:
+                st.html(build_eoq_curve_html(scan, current_q=cur_q))
 
             if unreliable:
                 st.caption(f"Supplier is {int(scan['reliability'] * 100)}% reliable, so missed "
@@ -7084,22 +7110,23 @@ else:
 
             st.html(render_pnl(fr))
 
-            st.markdown('<div class="card-title" style="margin-top:0.8rem">Where the money goes</div>',
-                        unsafe_allow_html=True)
-            st.bar_chart(
-                pd.Series({
-                    "Production": fr["prod_cost"],
-                    "Fixed (dies)": fr["fixed_alloc"],
-                    "WIP holding": fr["wip_cost"],
-                    "Raw material": fr["raw_cost"],
-                    "Ordering": fr["order_cost"],
-                }, name="Cost ($)"),
-                height=220,
-            )
+            if SHOW_CHARTS:
+                st.markdown('<div class="card-title" style="margin-top:0.8rem">Where the money goes</div>',
+                            unsafe_allow_html=True)
+                st.bar_chart(
+                    pd.Series({
+                        "Production": fr["prod_cost"],
+                        "Fixed (dies)": fr["fixed_alloc"],
+                        "WIP holding": fr["wip_cost"],
+                        "Raw material": fr["raw_cost"],
+                        "Ordering": fr["order_cost"],
+                    }, name="Cost ($)"),
+                    height=220,
+                )
 
             # ---- Profit vs. die size: the sweet-spot curve ----
             scan = results.get("die_scan")
-            if scan:
+            if scan and SHOW_CHARTS:
                 curve = [
                     {"faces": e["faces"],
                      "profit": compute_financials(
@@ -7162,26 +7189,27 @@ if SHOW_SANDBOX_TOOLS and rep and rep.get("profit"):
         st.markdown('<div class="card-title" style="margin-top:0.6rem">Profit distribution</div>',
                     unsafe_allow_html=True)
         hp = numeric_histogram_series(prof, name="Years")
-        if hp is not None:
+        if SHOW_CHARTS and hp is not None:
             st.bar_chart(hp, height=200)
         st.caption(f"{pct_profit:.0f}% of the {n} simulated years turned a profit; "
                    f"the rest lost money. Break-even is $0.")
 
-        st.markdown('<div class="card-title" style="margin-top:0.6rem">Spread of each outcome '
-                    '(box = middle 50%, line = median, whiskers = full range)</div>',
-                    unsafe_allow_html=True)
-        st.html(build_boxplots_html([
-            {"label": "Net profit ($)", "values": prof,
-             "fmt": lambda v: f"${v:,.0f}", "color": "#15803d"},
-            {"label": "Throughput (bottles/yr)", "values": rep["throughput"],
-             "fmt": lambda v: f"{v:,.0f}", "color": "#ea580c"},
-            {"label": "Avg WIP (units)", "values": rep["wip"],
-             "fmt": lambda v: f"{v:,.0f}", "color": "#f79009"},
-            {"label": "Flow time (days)", "values": rep["flow"],
-             "fmt": lambda v: f"{v:.1f}", "color": "#9b6dff"},
-            {"label": "Efficiency (%)", "values": rep["efficiency"],
-             "fmt": lambda v: f"{v:.0f}%", "color": "#9a3412"},
-        ]))
+        if SHOW_CHARTS:
+            st.markdown('<div class="card-title" style="margin-top:0.6rem">Spread of each outcome '
+                        '(box = middle 50%, line = median, whiskers = full range)</div>',
+                        unsafe_allow_html=True)
+            st.html(build_boxplots_html([
+                {"label": "Net profit ($)", "values": prof,
+                 "fmt": lambda v: f"${v:,.0f}", "color": "#15803d"},
+                {"label": "Throughput (bottles/yr)", "values": rep["throughput"],
+                 "fmt": lambda v: f"{v:,.0f}", "color": "#ea580c"},
+                {"label": "Avg WIP (units)", "values": rep["wip"],
+                 "fmt": lambda v: f"{v:,.0f}", "color": "#f79009"},
+                {"label": "Flow time (days)", "values": rep["flow"],
+                 "fmt": lambda v: f"{v:.1f}", "color": "#9b6dff"},
+                {"label": "Efficiency (%)", "values": rep["efficiency"],
+                 "fmt": lambda v: f"{v:.0f}%", "color": "#9a3412"},
+            ]))
         st.caption(f"Line: {config_summary(rep['meta']['config'])}. Profit uses the current "
                    f"financials, so editing them re-prices every replication on the next run.")
 
