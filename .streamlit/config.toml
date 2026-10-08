@@ -10,3 +10,8 @@ textColor = "#1f2a44"
 
 [client]
 toolbarMode = "minimal"
+
+[server]
+# Class use: many short-lived sessions from one process.
+maxUploadSize = 1
+enableXsrfProtection = true
