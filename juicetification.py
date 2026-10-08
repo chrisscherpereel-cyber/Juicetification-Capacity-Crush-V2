@@ -1742,6 +1742,7 @@ def render_pnl(f):
 SCAN_DICE = [2, 4, 6, 8, 10, 12]
 
 
+@st.cache_data(ttl=3600, max_entries=512, show_spinner=False)
 def compute_die_scan(caps, base_sides, start_inv, hours, supply_reliability, wip_limits=None,
                      demand_dice=0, demand_faces=0, order_size=1):
     """For each standard die size, re-run the line with *every active station*
@@ -1825,6 +1826,7 @@ def build_profit_curve_html(curve, current_faces=None):
 # =========================================================
 # EOQ (Economic Order Quantity) — cost model, scan, and curve
 # =========================================================
+@st.cache_data(ttl=3600, max_entries=512, show_spinner=False)
 def eoq_annual_demand(caps, sides, hours):
     """Annual raw-material consumption with a reliable, well-stocked supplier — the
     'D' in the EOQ formula. Order size doesn't change throughput, so this is stable."""
@@ -1843,6 +1845,7 @@ def eoq_unit_margin(results, caps, sides, years, fin):
     return max(0.0, (f["revenue"] - f["prod_cost"] - f["raw_cost"]) / sold)
 
 
+@st.cache_data(ttl=3600, max_entries=512, show_spinner=False)
 def compute_eoq_scan(caps, sides, hours, reliability, order_cost, margin, qs=None,
                      include_q=None, hold_per_day=None):
     """Run the line at a spread of order sizes and split the inventory-related cost into

@@ -82,6 +82,16 @@ def _install_stub():
                 return f
             return _d
 
+        def cache_data(self, *a, **k):
+            # Passthrough for the app's @st.cache_data on the scan functions. Supports both
+            # @st.cache_data and @st.cache_data(...). (Real caching only matters in the app.)
+            if a and callable(a[0]) and not k:
+                return a[0]
+
+            def _deco(fn):
+                return fn
+            return _deco
+
         def file_uploader(self, *a, **k):
             return None          # matches real Streamlit: None until a file is uploaded
 
